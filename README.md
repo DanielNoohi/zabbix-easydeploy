@@ -23,7 +23,8 @@ No prior Zabbix or Linux expertise needed!
 Copy & paste this single line into your Ubuntu terminal:
 
 ```bash
-curl -O https://raw.githubusercontent.com/DanielNoohi/zabbix-easydeploy/main/zabbix-auto-install.sh && chmod +x ./zabbix-auto-install.sh && sudo ./zabbix-auto-install.sh
+curl -sSL https://raw.githubusercontent.com/DanielNoohi/zabbix-easydeploy/main/zabbix-auto-install.sh | dos2unix | tee zabbix-auto-install.sh > /dev/null && chmod +x zabbix-auto-install.sh && sudo ./zabbix-auto-install.sh
+
 ```
 
 The script will prompt you for your server's IP address or domain name and then handle everything else automatically.
