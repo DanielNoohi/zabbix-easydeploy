@@ -53,12 +53,9 @@ After installation completes, access your Zabbix Web Interface:
 http://your-server-ip-or-domain/zabbix
 ```
 
-**Default Credentials:**
+**Default Username:** `Admin`
 
-* Username: `Admin`
-* Password: `zabbix`
-
-*(Remember to immediately change your default Zabbix password after logging in!)*
+*(The initial admin password is randomly generated and displayed once at the end of installation—please store it safely!)*
 
 ---
 
