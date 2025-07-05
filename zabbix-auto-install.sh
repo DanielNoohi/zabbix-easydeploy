@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Detect CRLF line endings and fix automatically if needed
+# --- Self-healing for Windows CRLF line endings ---
 if file "$0" | grep -q "CRLF"; then
     echo "[*] Converting script line endings from CRLF to LF for compatibility..."
     tmpfix=$(mktemp)
@@ -23,13 +23,13 @@ function print_error() {
     echo -e "${RED}[!] $1${NC}"
 }
 
-# Ensure running as root
+# --- Root check ---
 if [[ $EUID -ne 0 ]]; then
-    print_error "This script must be run as root. Use sudo ./script_name.sh"
+    print_error "This script must be run as root. Use sudo ./zabbix-auto-install.sh"
     exit 1
 fi
 
-# Check if services exist or ports are used
+# --- Check services and port 80 ---
 for svc in apache2 mariadb zabbix-server; do
     if systemctl is-active --quiet $svc; then
         print_error "Service '$svc' is already installed and active! Stop or remove it first."
@@ -42,7 +42,7 @@ if ss -tuln | grep -q ":80 "; then
     exit 1
 fi
 
-# Get server IP or domain
+# --- User input for server address ---
 echo
 read -p "Enter your server's IP address or domain name (e.g., 192.168.1.10 or zabbix.example.com): " SERVER_ADDR
 if [[ -z "$SERVER_ADDR" ]]; then
@@ -50,12 +50,11 @@ if [[ -z "$SERVER_ADDR" ]]; then
     exit 1
 fi
 
-# Generate strong random passwords (exactly 12 chars)
+# --- Strong random passwords (12 chars) ---
 gen_pass() {
     tr -dc 'A-Za-z0-9!@#$%&*' </dev/urandom | head -c12
     echo
 }
-
 ZABBIX_ROOT_PASS=$(gen_pass)
 ZABBIX_DB_PASS=$(gen_pass)
 
@@ -74,9 +73,21 @@ mysql -uroot -p"${ZABBIX_ROOT_PASS}" -e "CREATE DATABASE zabbix CHARACTER SET ut
 mysql -uroot -p"${ZABBIX_ROOT_PASS}" -e "CREATE USER 'zabbix'@'localhost' IDENTIFIED BY '${ZABBIX_DB_PASS}';"
 mysql -uroot -p"${ZABBIX_ROOT_PASS}" -e "GRANT ALL PRIVILEGES ON zabbix.* TO 'zabbix'@'localhost'; FLUSH PRIVILEGES;"
 
+# --- Zabbix repo selection for unsupported Ubuntu versions ---
+UBUNTU_VERSION=$(lsb_release -rs)
+case "$UBUNTU_VERSION" in
+    22.04|20.04|18.04)
+        ZBX_VER="$UBUNTU_VERSION"
+        ;;
+    *)
+        ZBX_VER="22.04"
+        print_status "Your Ubuntu version ($UBUNTU_VERSION) is not officially supported by Zabbix. Using 22.04 repo (should work fine)."
+        ;;
+esac
+
 print_status "Adding Zabbix repository..."
-wget https://repo.zabbix.com/zabbix/6.0/ubuntu/pool/main/z/zabbix-release/zabbix-release_6.0-6+ubuntu$(lsb_release -rs)_all.deb
-dpkg -i zabbix-release_6.0-6+ubuntu$(lsb_release -rs)_all.deb
+wget -q https://repo.zabbix.com/zabbix/6.0/ubuntu/pool/main/z/zabbix-release/zabbix-release_6.0-6+ubuntu${ZBX_VER}_all.deb
+dpkg -i zabbix-release_6.0-6+ubuntu${ZBX_VER}_all.deb
 apt update
 
 print_status "Installing Zabbix server components..."
