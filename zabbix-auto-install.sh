@@ -1,5 +1,15 @@
 #!/bin/bash
 
+# Detect CRLF line endings and fix automatically if needed
+if file "$0" | grep -q "CRLF"; then
+    echo "[*] Converting script line endings from CRLF to LF for compatibility..."
+    tmpfix=$(mktemp)
+    tr -d '\r' < "$0" > "$tmpfix"
+    chmod +x "$tmpfix"
+    exec bash "$tmpfix" "$@"
+    exit
+fi
+
 set -e
 
 GREEN='\033[0;32m'
