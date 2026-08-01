@@ -19,6 +19,7 @@ NC='\033[0m'
 function print_status() {
     echo -e "${GREEN}[*] $1${NC}"
 }
+
 function print_error() {
     echo -e "${RED}[!] $1${NC}"
 }
@@ -65,7 +66,9 @@ print_status "Installing prerequisites..."
 apt install -y apache2 mariadb-server php php-mbstring php-gd php-xml php-bcmath php-ldap php-mysql php-zip php-json php-xmlreader php-curl wget curl gnupg2 lsb-release
 
 print_status "Securing MariaDB..."
-mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${ZABBIX_ROOT_PASS}'; FLUSH PRIVILEGES;"
+# Change root user to use mysql_native_password and set password
+mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('${ZABBIX_ROOT_PASS}'); FLUSH PRIVILEGES;"
+# Remove anonymous users, drop test database, and remove privileges for test database
 mysql -uroot -p"${ZABBIX_ROOT_PASS}" -e "DELETE FROM mysql.user WHERE User=''; DROP DATABASE IF EXISTS test; DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%'; FLUSH PRIVILEGES;"
 
 print_status "Creating Zabbix database and user..."
@@ -96,6 +99,10 @@ apt install -y zabbix-server-mysql zabbix-frontend-php zabbix-apache-conf zabbix
 print_status "Importing initial schema..."
 zcat /usr/share/zabbix-sql-scripts/mysql/server.sql.gz | mysql -uzabbix -p"${ZABBIX_DB_PASS}" zabbix
 
+print_status "Setting Zabbix admin password..."
+ZABBIX_ADMIN_PASS=$(gen_pass)
+mysql -uzabbix -p"${ZABBIX_DB_PASS}" zabbix -e "UPDATE users SET passwd=MD5('${ZABBIX_ADMIN_PASS}') WHERE alias='Admin';"
+
 print_status "Configuring Zabbix database connection..."
 sed -i "s/^# DBPassword=.*/DBPassword=${ZABBIX_DB_PASS}/" /etc/zabbix/zabbix_server.conf
 
@@ -110,7 +117,7 @@ echo
 echo -e "${RED}⚠️  IMPORTANT: SAVE THESE CREDENTIALS NOW. THEY WILL NOT BE SHOWN AGAIN!${NC}"
 echo "-------------------------------------------------------------------"
 echo -e "${GREEN}🌐 Web interface:${NC} http://${SERVER_ADDR}/zabbix"
-echo -e "${GREEN}🔑 Zabbix Web Login:${NC} Admin / zabbix"
+echo -e "${GREEN}🔑 Zabbix Web Login:${NC} Admin / ${ZABBIX_ADMIN_PASS}"
 echo "🔐 Database User: zabbix"
 echo "🔐 Database Pass: ${ZABBIX_DB_PASS}"
 echo "🔐 MariaDB Root Pass: ${ZABBIX_ROOT_PASS}"
