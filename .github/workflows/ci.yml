@@ -1,0 +1,31 @@
+# .github/workflows/ci.yml
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y shellcheck shfmt bats
+    
+    - name: ShellCheck
+      run: shellcheck zabbix-auto-install.sh
+    
+    - name: shfmt
+      run: |
+        shfmt -d -l -i 2 zabbix-auto-install.sh
+        # If you want to auto-format and commit, you can uncomment the following:
+        # shfmt -w -l -i 2 zabbix-auto-install.sh
+    
+    - name: Bats tests
+      run: bats test/

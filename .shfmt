@@ -1,0 +1,15 @@
+# .shfmt configuration
+# We'll use the default settings which are:
+#   - Indentation: 2 spaces
+#   - Binary next line: true
+#   - Case indent: true
+#   - Simplify: true
+#   - No other flags needed for now.
+# If you want to override, you can set:
+#   -i 2 for indent size 2
+#   -bn for binary next line
+#   -ci for case indent
+#   -sr for simplify
+#   -kp for keep trailing spaces (we don't want that)
+# We'll just rely on the defaults and specify the version.
+version: 3.7.0
