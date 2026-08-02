@@ -1,20 +1,4 @@
-# ShellCheck configuration for zabbix-easydeploy
-# Sparse mode to avoid false positives on modern Ubuntu default configs
-spare=yes
-enables+=()
-disables+=()
+sparse=yes
 severity=warning
 include=src
-
-# shellcheck configuration used in CI
-exclude=SC2002,SC2181,SC1091,SC2129,SC2086,SC2046,SC2143,SC2155
-allow-undefined=0
-builtin=1
-falsy=1
-global=1
-defaults=1
-learning=1
-quote-fix=default
-shword-parse=0
-ignore-comments=0
-exclude=SC2034,SC2076,SC2119,SC2120,SC2145,SC2154,SC3028
+exclude=SC2002,SC2181,SC1091,SC2129,SC2086,SC2046,SC2143,SC2155,SC2034,SC2076,SC2119,SC2120,SC2145,SC2154,SC3028
