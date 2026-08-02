@@ -17,6 +17,9 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y shellcheck shfmt bats
+        mkdir -p test/test_helper
+        git clone --depth 1 https://github.com/bats-core/bats-support.git test/test_helper/bats-support
+        git clone --depth 1 https://github.com/bats-core/bats-assert.git test/test_helper/bats-assert
     
     - name: ShellCheck
       run: shellcheck zabbix-auto-install.sh
