@@ -1,0 +1,6 @@
+# Test helper dependencies (cloned locally, not committed)
+test/test_helper/
+
+# OS generated files
+.DS_Store
+Thumbs.db
