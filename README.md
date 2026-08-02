@@ -8,8 +8,8 @@
 
 *   **Interactive & Unattended Modes** – Run interactively or via CLI flags for CI/CD.
 *   **Dry‑Run Mode** – Preview actions without executing (`--dry-run`).
-*   **Idempotent & Safe** – Safe to re-run; backs up configs before changes.
-*   **Secure Credential Handling** – Uses temporary `MYSQL_PWD`; strong 32‑char random passwords.
+*   **Idempotent & Safe** – Safe to re-run: reuses existing DB/admin passwords and credential file, skips schema import when the `zabbix` DB is already populated, backs up configs before changes.
+*   **Secure Credential Handling** – Secrets never appear in command-line arguments or logs: MySQL runs via `MYSQL_PWD`/option files, `sed` via script file, all output masked (`[REDACTED]`). Strong 32‑char random passwords (alphanumeric, pipefail‑safe).
 *   **TLS Options** – No TLS, self‑signed certificate, or Let's Encrypt (if `certbot` available).
 *   **Firewall** – Optional UFW configuration for HTTP/HTTPS and Zabbix ports.
 *   **Zabbix Versions** – Supports Zabbix 6.0 LTS and 7.0 LTS (default 7.0).
@@ -111,11 +111,11 @@ sudo ./zabbix-auto-install.sh \
 2.   **Package Installation** – Installs Apache/MariaDB/PHP (unless skipped) and required PHP extensions.
 3.   **Zabbix Repository** – Adds the official Zabbix repository for the chosen version and Ubuntu codename.
 4.   **Zabbix Components** – Installs server, frontend, agent (v1 or v2), and SQL scripts.
-5.   **Database Setup** – Creates the `zabbix` database and user, imports initial schema.
-6.   **Credential Generation** – Creates strong random passwords for root, database, and admin user.
-7.   **MariaDB Hardening** – Sets root password (using `mysql_native_password`), removes anonymous users, drops `test` DB.
-8.   **Zabbix Configuration** – Sets database password in `zabbix_server.conf`.
-9.   **Agent Configuration** – Configures agent to listen on `127.0.0.1` and sets hostname.
+5.   **Database Setup** – Creates the `zabbix` database and user (idempotent; password re-applied on reruns), imports initial schema only if the DB is not already populated.
+6.   **Credential Generation** – Creates strong random passwords for root, database, and admin user (or reuses existing ones from `zabbix_server.conf` / credentials file).
+7.   **MariaDB Hardening** – Sets root password while keeping `unix_socket` auth for `sudo mysql`, removes anonymous users, drops `test` DB.
+8.   **Zabbix Configuration** – Writes the database password into `zabbix_server.conf` via a temp `sed` script file (never in argv/logs).
+9.   **Agent Configuration** – Configures the selected agent (1 or 2) to listen on `127.0.0.1` and sets hostname; stops/disables the unselected agent.
 10.  **Web Server Setup** (if Apache not skipped):
     *   Enables `rewrite`, `ssl`, `headers` modules.
     *   Sets PHP timezone (default `UTC`, configurable).
@@ -133,7 +133,7 @@ This project includes:
 
 *   **ShellCheck** – Static shell script analysis (`.shellcheckrc`).
 *   **shfmt** – Shell script formatter (`.shfmt`).
-*   **Bats** – Bash Automated Testing System (see `tests/` directory).
+*   **Bats** – Bash Automated Testing System (`test/` directory: argument-parsing + idempotency/dry-run suites).
 *   **GitHub Actions** – CI workflow that runs on every push and pull request.
 
 ### Running Tests Locally

@@ -3,7 +3,7 @@
 load 'test_helper/bats-support/load'
 load 'test_helper/bats-assert/load'
 
-# Helper function to run the script with given arguments and capture output and status
+# Helper function to run the script with given arguments
 run_script() {
   run ./zabbix-auto-install.sh "$@"
 }
@@ -37,24 +37,15 @@ run_script() {
   assert_output --partial "Conflicting TLS options"
 }
 
-# Test that invalid email format is not caught (we don't validate email format, just presence)
-# We can test that the script proceeds when email is provided for letsencrypt (but will fail later due to missing domain, etc.)
-# We are only testing argument parsing, so we expect it to pass the argument check and move on.
-# However, note that the script will still fail because it's not actually installing, but we are only testing the argument parsing.
-# We'll change the test to expect that the script does not fail on the argument check for missing email when we provide one.
+# Test that LetsEncrypt mode with email passes argument check
 @test "LetsEncrypt mode with email passes argument check" {
-  # We expect the script to fail later (due to missing domain, etc.) but not due to missing email
-  run_script --non-interactive --ip 1.2.3.4 --tls letsencrypt --le-email test@example.com
-  # We don't assert success because the script will try to run and fail due to missing actual installation
-  # But we can assert that it doesn't fail with the email error.
+  run_script --non-interactive --ip 1.2.3.4 --tls letsencrypt --le-email test@example.com --dry-run
+  assert_success
   refute_output --partial "Let's Encrypt mode requires --le-email"
 }
 
 # Test that the script accepts valid zabbix versions
 @test "Accepts zabbix version 6.0" {
-  run_script --help
-  assert_success
-  # We can't easily test the version without running the script, but we can check that the option is accepted in help
   run_script --zabbix-ver 6.0 --help
   assert_success
 }
@@ -83,7 +74,7 @@ run_script() {
   assert_success
 }
 
-# Test that the script accepts save-creds
+# Test that the script accepts save-creds option
 @test "Accepts save-creds option" {
   run_script --save-creds /tmp/test.txt --help
   assert_success
@@ -136,3 +127,5 @@ run_script() {
   run_script --skip-php-tuning --help
   assert_success
 }
+
+# -------------------------
