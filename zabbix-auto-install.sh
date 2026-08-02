@@ -30,8 +30,12 @@ TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 log() {
   local level="$1"
   shift
-  local msg="$*"
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $msg" | tee -a "$LOG_FILE"
+  local msg="[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $*"
+  echo "$msg"
+  # Write to log file only if writable (never fail the script over logging)
+  if { [[ -w "$LOG_FILE" ]] || [[ -w "$(dirname "$LOG_FILE")" ]]; }; then
+    echo "$msg" >> "$LOG_FILE"
+  fi
 }
 
 die() {
@@ -42,6 +46,37 @@ die() {
 info() { log "INFO" "$*"; }
 
 warn() { log "WARN" "$*"; }
+
+print_help() {
+  cat <<'EOF'
+Usage: sudo ./zabbix-auto-install.sh [OPTIONS]
+
+Production-ready Zabbix Server installer (6.0 / 7.0) for Ubuntu.
+
+Options:
+  -h, --help                 Show this help
+  -i, --ip ADDR              Server IP or hostname
+  -z, --zabbix-ver VER       Zabbix version: 6.0 or 7.0 (default: 7.0)
+  -u, --ubuntu-ver VER       Ubuntu version override (default: detected)
+  -t, --timezone TZ          Timezone (default: UTC)
+  -l, --tls MODE             TLS mode: none, selfsigned, letsencrypt (default: selfsigned)
+  -e, --le-email EMAIL       Email for Let's Encrypt (required with --tls letsencrypt)
+  -s, --save-creds FILE      Save generated credentials to FILE (chmod 600)
+  -n, --non-interactive      Run without prompts (requires --ip)
+  -f, --force                Skip pre-flight checks
+  -d, --dry-run              Show actions without executing
+      --no-firewall          Skip UFW firewall configuration
+      --skip-ssl             Skip SSL (use with external proxy)
+      --agent2               Install Zabbix Agent 2 instead of Agent 1
+      --skip-apache          Skip Apache installation
+      --skip-php-tuning      Skip PHP timezone tuning
+
+Examples:
+  sudo ./zabbix-auto-install.sh -i 192.168.1.10
+  sudo ./zabbix-auto-install.sh -n -i 192.168.1.10 -z 7.0 -l none -s creds.txt
+  sudo ./zabbix-auto-install.sh -d -i server.example.com --agent2
+EOF
+}
 
 # Backup a file if it exists, appending timestamp
 backup_file() {
@@ -68,14 +103,15 @@ validate_server_addr() {
   fi
 }
 
-# Execute a command respecting dry‑run mode
+# Execute a command respecting dry-run mode (no eval - safe)
 run_cmd() {
   local cmd="$*"
   if $DRY_RUN; then
-    info "DRY‑RUN: $cmd"
+    info "DRY-RUN: $cmd"
   else
     info "Running: $cmd"
-    eval "$cmd"
+    # shellcheck disable=SC2086
+    $cmd
   fi
 }
 
@@ -94,6 +130,8 @@ ENABLE_FIREWALL=true
 USE_AGENT2=false
 SKIP_APACHE=false
 SKIP_PHP_TUNING=false
+SKIP_SSL=false
+TLS_REQUESTED="" # set when --tls is used explicitly
 OPTSPEC=":hi:z:u:t:l:e:s:nfd-:"
 while getopts "$OPTSPEC" optchar; do
   case "$optchar" in
@@ -121,6 +159,7 @@ while getopts "$OPTSPEC" optchar; do
       ;;
     tls)
       TLS_MODE="${!OPTIND}"
+      TLS_REQUESTED="$TLS_MODE"
       OPTIND=$((OPTIND + 1))
       ;;
     le-email)
@@ -153,7 +192,7 @@ while getopts "$OPTSPEC" optchar; do
   z) ZABBIX_VERSION="$OPTARG" ;;
   u) UBUNTU_VERSION="$OPTARG" ;;
   t) TIMEZONE="$OPTARG" ;;
-  l) TLS_MODE="$OPTARG" ;;
+  l) TLS_MODE="$OPTARG"; TLS_REQUESTED="$TLS_MODE" ;;
   e) LE_EMAIL="$OPTARG" ;;
   s) SAVE_CREDS="$OPTARG" ;;
   n) NON_INTERACTIVE=true ;;
@@ -171,11 +210,19 @@ fi
 if [[ "$TLS_MODE" == "letsencrypt" && -z "$LE_EMAIL" ]]; then
   die "Let's Encrypt mode requires --le-email"
 fi
-if [[ "$TLS_MODE" != "none" && "$SKIP_SSL" == true ]]; then
+# Conflict: user explicitly requested letsencrypt/selfsigned but also --skip-ssl
+if [[ "$SKIP_SSL" == true && -n "$TLS_REQUESTED" && "$TLS_REQUESTED" != "none" ]]; then
   die "Conflicting TLS options"
 fi
 
+# Validate Zabbix version early so --help-style arg tests can verify it
+case "$ZABBIX_VERSION" in
+6.0 | 7.0) ;;
+*) die "Unsupported Zabbix version $ZABBIX_VERSION" ;;
+esac
+
 #-------------------------- Pre‑flight checks --------------------------
+# Root check happens AFTER argument validation so --help/arg tests work
 if [[ $EUID -ne 0 ]]; then
   die "This script must be run as root (use sudo)"
 fi

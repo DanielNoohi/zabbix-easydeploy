@@ -66,7 +66,7 @@ run_script() {
 
 # Test that invalid zabbix version is rejected
 @test "Rejects invalid zabbix version" {
-  run_script --zabbix-ver 9.9 --help
+  run_script --zabbix-ver 9.9 --non-interactive --ip 1.2.3.4 --tls none
   assert_failure
   assert_output --partial "Unsupported Zabbix version"
 }
