@@ -17,18 +17,24 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y shellcheck shfmt bats
-        mkdir -p test/test_helper
-        git clone --depth 1 https://github.com/bats-core/bats-support.git test/test_helper/bats-support
-        git clone --depth 1 https://github.com/bats-core/bats-assert.git test/test_helper/bats-assert
     
     - name: ShellCheck
       run: shellcheck zabbix-auto-install.sh
     
     - name: shfmt
+      run: shfmt -d -l -i 2 zabbix-auto-install.sh
+    
+    - name: Set up test helpers
       run: |
-        shfmt -d -l -i 2 zabbix-auto-install.sh
-        # If you want to auto-format and commit, you can uncomment the following:
-        # shfmt -w -l -i 2 zabbix-auto-install.sh
+        mkdir -p test/test_helper
+        for i in 1 2 3; do
+          git clone --depth 1 https://github.com/bats-core/bats-support.git test/test_helper/bats-support && break
+          sleep 2
+        done
+        for i in 1 2 3; do
+          git clone --depth 1 https://github.com/bats-core/bats-assert.git test/test_helper/bats-assert && break
+          sleep 2
+        done
     
     - name: Bats tests
       run: bats test/
