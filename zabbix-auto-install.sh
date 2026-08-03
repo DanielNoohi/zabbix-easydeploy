@@ -312,7 +312,7 @@ else
 fi
 
 case "$UBUNTU_VERSION" in
-24.04|22.04|20.04|18.04) ZBX_REPO_VER="$UBUNTU_VERSION" ;;
+24.04 | 22.04 | 20.04 | 18.04) ZBX_REPO_VER="$UBUNTU_VERSION" ;;
 unknown)
   if $DRY_RUN; then
     ZBX_REPO_VER="22.04"
