@@ -89,19 +89,15 @@ backup_file() {
   fi
 }
 
-# password generator — python3 only; no unsafe tr|head fallback
+# password generator — python3 only; exact length verified
 gen_pass() {
   local len="${1:-32}" pass=""
-  if command -v python3 &>/dev/null; then
-    pass=$(python3 -c "
+  command -v python3 &>/dev/null || die "python3 is required for password generation"
+  pass=$(python3 -c "
 import secrets, string
 print(''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range($len)))
-" 2>/dev/null || true)
-  fi
-  if [[ -z "$pass" ]] && command -v openssl &>/dev/null; then
-    pass=$(openssl rand -base64 48 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c "$len" || true)
-  fi
-  [[ -n "$pass" ]] || die "Failed to generate secure password"
+" 2>/dev/null) || die "Failed to generate secure password"
+  [[ ${#pass} -eq "$len" ]] || die "Generated password length ${#pass} != expected $len"
   echo "$pass"
 }
 
@@ -443,15 +439,32 @@ fi
 info "Updating Zabbix Web Admin password..."
 case "$ZABBIX_VERSION" in
 6.0)
-  # Zabbix 6.0: users.passwd = MD5 (legacy column)
+  # Zabbix 6.0: users.passwd = MD5 (legacy format)
   mysql_exec_secure "USE zabbix; UPDATE users SET passwd=MD5('$ZABBIX_ADMIN_PASS') WHERE alias='Admin';" ||
     die "Failed to set Zabbix Admin password"
+  info "Admin password set (MD5, Zabbix 6.0 format)"
   ;;
 7.0)
-  # Zabbix 7.0 LTS: users.passwd still uses MD5 for login backwards compat.
-  # Additionally set passwd_history (bcrypt hash via Zabbix API) when column exists.
-  mysql_exec_secure "USE zabbix; UPDATE users SET passwd=MD5('$ZABBIX_ADMIN_PASS') WHERE alias='Admin';" ||
-    die "Failed to set Zabbix Admin password"
+  # Zabbix 7.0: users.passwd uses PHP password_hash (bcrypt). Generate it via PHP CLI.
+  if command -v php &>/dev/null; then
+    BC_HASH=$(php -r "
+echo password_hash('${ZABBIX_ADMIN_PASS}', PASSWORD_BCRYPT);
+" 2>/dev/null) || BC_HASH=""
+    if [[ -n "$BC_HASH" ]]; then
+      mysql_exec_secure "USE zabbix; UPDATE users SET passwd='$BC_HASH' WHERE alias='Admin';" ||
+        die "Failed to set Zabbix Admin password (bcrypt)"
+      info "Admin password set (bcrypt, Zabbix 7.0 format)"
+    else
+      # Fallback to MD5 if PHP CLI unavailable (graceful degradation)
+      warn "PHP CLI not available; falling back to MD5 password hash"
+      mysql_exec_secure "USE zabbix; UPDATE users SET passwd=MD5('$ZABBIX_ADMIN_PASS') WHERE alias='Admin';" ||
+        die "Failed to set Zabbix Admin password"
+    fi
+  else
+    warn "PHP CLI not installed; falling back to MD5 password hash"
+    mysql_exec_secure "USE zabbix; UPDATE users SET passwd=MD5('$ZABBIX_ADMIN_PASS') WHERE alias='Admin';" ||
+      die "Failed to set Zabbix Admin password"
+  fi
   # Verify the update took effect
   mysql_exec "USE zabbix; SELECT passwd FROM users WHERE alias='Admin';" | grep -q . ||
     die "Admin password update verification failed"
@@ -462,18 +475,20 @@ esac
 backup_file "$ZABBIX_CONF"
 SED_SCRIPT=$(mktemp)
 chmod 600 "$SED_SCRIPT"
-printf 's/^#\?DBPassword=.*/DBPassword=%s/\n' "$ZABBIX_DB_PASS" >"$SED_SCRIPT"
+# Remove any existing DBPassword (commented or active)
+printf '/^[[:space:]]*#\\?[[:space:]]*DBPassword[[:space:]]*=/d\n' >"$SED_SCRIPT"
 run_cmd sed -i -f "$SED_SCRIPT" "$ZABBIX_CONF"
+# Append fresh entry
+if ! $DRY_RUN; then
+  echo "DBPassword=$ZABBIX_DB_PASS" >>"$ZABBIX_CONF"
+  info "DBPassword written to $ZABBIX_CONF"
+  # Verify
+  grep -q "^DBPassword=" "$ZABBIX_CONF" || die "DBPassword verification failed in $ZABBIX_CONF"
+else
+  info "DRY-RUN: Would set DBPassword=$ZABBIX_DB_PASS in $ZABBIX_CONF"
+fi
 rm -f "$SED_SCRIPT"
 SED_SCRIPT=""
-# If DBPassword was not present at all, append it
-if ! $DRY_RUN; then
-  if ! grep -q '^DBPassword=' "$ZABBIX_CONF" 2>/dev/null; then
-    info "DBPassword not found after sed - inserting it"
-    echo "DBPassword=$ZABBIX_DB_PASS" >>"$ZABBIX_CONF"
-  fi
-  info "Verified DBPassword is set in $ZABBIX_CONF"
-fi
 
 #-------------------------- Zabbix agent configuration ----------------
 if $USE_AGENT2; then
