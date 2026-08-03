@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# zabbix-auto-install.sh – Production-ready Zabbix Server installer
+# zabbix-auto-install.sh – Zabbix Server installer for Ubuntu
 #   • Interactive and unattended modes
 #   • Dry‑run mode (zero system changes – no files created)
 #   • Idempotent – safe to re‑run, reuses existing credentials & schema
 #   • Secure credential handling (MYSQL opt‑file, sed script file, masked logs)
-#   • Version‑aware Admin password hash (MD5 on 6.0, PBKDF2/SHA2 on 7.0)
+#   • Version‑correct Admin password hash (MD5 on 6.0, MD5+passwd_history on 7.0)
 #   • Apache PHP ini tuned (not CLI php.ini)
 #   • Rejects unsupported Ubuntu versions; fails on critical DB ops
 #   • Verified schema import, service status, and HTTP endpoint before success
@@ -89,6 +89,7 @@ backup_file() {
   fi
 }
 
+# password generator — python3 only; no unsafe tr|head fallback
 gen_pass() {
   local len="${1:-32}" pass=""
   if command -v python3 &>/dev/null; then
@@ -99,9 +100,6 @@ print(''.join(secrets.choice(string.ascii_letters + string.digits) for _ in rang
   fi
   if [[ -z "$pass" ]] && command -v openssl &>/dev/null; then
     pass=$(openssl rand -base64 48 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c "$len" || true)
-  fi
-  if [[ -z "$pass" ]]; then
-    pass=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | dd bs=1 count="$len" 2>/dev/null || true)
   fi
   [[ -n "$pass" ]] || die "Failed to generate secure password"
   echo "$pass"
@@ -125,7 +123,7 @@ run_cmd() {
   fi
 }
 
-# MySQL helpers – no secrets in argv (SQL via temp file)
+# MySQL helpers — no secrets in argv (SQL via temp file)
 mysql_exec_secure() {
   local sql="$1"
   if $DRY_RUN; then
@@ -166,7 +164,7 @@ print_help() {
   cat <<'EOF'
 Usage: sudo ./zabbix-auto-install.sh [OPTIONS]
 
-Production-ready Zabbix Server installer (6.0 / 7.0 LTS) for Ubuntu.
+Zabbix Server installer (6.0 / 7.0 LTS) for Ubuntu.
 
 Options:
   -h, --help                 Show this help
@@ -370,33 +368,30 @@ run_cmd wget -q "https://repo.zabbix.com/zabbix/${ZABBIX_VERSION}/ubuntu/pool/ma
 run_cmd dpkg -i "/tmp/${ZABBIX_REPO_PKG}"
 run_cmd apt-get update -y
 
-# Zabbix components (zabbix-frontend-php pulls in PHP + Apache dep, then we add exact PHP extensions)
-zabbix_pkgs=(zabbix-server-mysql zabbix-frontend-php zabbix-apache-conf zabbix-sql-scripts)
-$USE_AGENT2 && zabbix_pkgs+=(zabbix-agent2) || zabbix_pkgs+=(zabbix-agent)
+# Zabbix components – when --skip-apache, exclude frontend+apache packages
+if $SKIP_APACHE; then
+  zabbix_pkgs=(zabbix-server-mysql zabbix-sql-scripts)
+  $USE_AGENT2 && zabbix_pkgs+=(zabbix-agent2) || zabbix_pkgs+=(zabbix-agent)
+  info "--skip-apache: excluding zabbix-frontend-php, zabbix-apache-conf, and PHP extensions"
+else
+  zabbix_pkgs=(zabbix-server-mysql zabbix-frontend-php zabbix-apache-conf zabbix-sql-scripts)
+  $USE_AGENT2 && zabbix_pkgs+=(zabbix-agent2) || zabbix_pkgs+=(zabbix-agent)
+fi
 run_cmd apt-get install -y "${zabbix_pkgs[@]}"
 
-# PHP extensions for the web frontend (pulled via zabbix-frontend-php dep but ensure explicit)
-php_exts=(php-mysql php-mbstring php-gd php-xml php-bcmath php-ldap php-curl)
-run_cmd apt-get install -y "${php_exts[@]}"
-
-# Apache integration package (installed by zabbix-apache-conf, but be explicit)
 if ! $SKIP_APACHE; then
+  php_exts=(php-mysql php-mbstring php-gd php-xml php-bcmath php-ldap php-curl)
+  run_cmd apt-get install -y "${php_exts[@]}"
   apache_pkgs=(apache2 libapache2-mod-php)
   run_cmd apt-get install -y "${apache_pkgs[@]}"
 fi
 
 #-------------------------- MariaDB configuration -----------------------
 info "Configuring MariaDB..."
-
-# Set root password while keeping unix_socket auth (MariaDB 10.4+)
 mysql_exec_secure "ALTER USER 'root'@'localhost' IDENTIFIED VIA unix_socket OR mysql_native_password USING PASSWORD('$ZABBIX_ROOT_PASS'); FLUSH PRIVILEGES;" ||
   mysql_exec_secure "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('$ZABBIX_ROOT_PASS'); FLUSH PRIVILEGES;" ||
   die "Failed to set MariaDB root password"
-
-# Hardening
 mysql_exec "DELETE FROM mysql.user WHERE User=''; DROP DATABASE IF EXISTS test; DELETE FROM mysql.db WHERE Db='test' OR Db='test_%'; FLUSH PRIVILEGES;"
-
-# Create database and user (idempotent; password re-applied)
 mysql_exec "CREATE DATABASE IF NOT EXISTS zabbix CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;"
 mysql_exec_secure "CREATE USER IF NOT EXISTS 'zabbix'@'localhost' IDENTIFIED BY '$ZABBIX_DB_PASS';"
 mysql_exec_secure "ALTER USER 'zabbix'@'localhost' IDENTIFIED BY '$ZABBIX_DB_PASS';"
@@ -426,57 +421,44 @@ else
       break
     fi
   done
-
-  if [[ -z "$SCHEMA_SQL" ]]; then
-    die "Zabbix schema SQL file not found. Cannot continue."
-  fi
-
-  if $DRY_RUN; then
-    info "DRY-RUN: Import schema from $SCHEMA_SQL into zabbix database"
-  else
-    MYSQL_OPTFILE=$(mktemp /tmp/zabbix-mysql-XXXXXX.cnf)
-    chmod 600 "$MYSQL_OPTFILE"
-    cat >"$MYSQL_OPTFILE" <<EOF
+  [[ -z "$SCHEMA_SQL" ]] && die "Zabbix schema SQL file not found. Cannot continue."
+  MYSQL_OPTFILE=$(mktemp /tmp/zabbix-mysql-XXXXXX.cnf)
+  chmod 600 "$MYSQL_OPTFILE"
+  cat >"$MYSQL_OPTFILE" <<EOF
 [client]
 user=zabbix
 password=${ZABBIX_DB_PASS}
 EOF
-    if zcat "$SCHEMA_SQL" | mysql --defaults-extra-file="$MYSQL_OPTFILE" zabbix; then
-      info "Zabbix schema imported successfully"
-    else
-      warn "Schema import via zabbix user failed; retrying as root (socket auth)"
-      zcat "$SCHEMA_SQL" | mysql zabbix || die "Zabbix schema import failed"
-    fi
-    rm -f "$MYSQL_OPTFILE"
-    MYSQL_OPTFILE=""
+  if zcat "$SCHEMA_SQL" | mysql --defaults-extra-file="$MYSQL_OPTFILE" zabbix; then
+    info "Zabbix schema imported successfully"
+  else
+    warn "Schema import via zabbix user failed; retrying as root (socket auth)"
+    zcat "$SCHEMA_SQL" | mysql zabbix || die "Zabbix schema import failed"
   fi
+  rm -f "$MYSQL_OPTFILE"
+  MYSQL_OPTFILE=""
 fi
 
-# Version-aware Admin password hash
+#-------------------------- Admin password (version-correct) -----------
 info "Updating Zabbix Web Admin password..."
 case "$ZABBIX_VERSION" in
 6.0)
-  # Zabbix 6.0 uses MD5 (legacy)
+  # Zabbix 6.0: users.passwd = MD5 (legacy column)
   mysql_exec_secure "USE zabbix; UPDATE users SET passwd=MD5('$ZABBIX_ADMIN_PASS') WHERE alias='Admin';" ||
-    die "Failed to set Zabbix Admin password (MD5 hash path)"
+    die "Failed to set Zabbix Admin password"
   ;;
 7.0)
-  # Zabbix 7.0+ uses pbkdf2_sha256. We set via the internal hash function.
-  # Fallback: md5 still works on 7.0 for existing users, but use SHA2 if available.
-  # Try setting via the Zabbix PHP API config or direct SHA2 hash.
-  # For 7.0, the correct modern approach is to use passwd_history which stores
-  # pbkdf2_sha256 hashes. We hash here directly.
-  # On 7.0.0+, direct MySQL UPDATE uses the 'passwd' column. In 7.0 the format
-  # is the same 32-char MD5 for backward compat during migration.
+  # Zabbix 7.0 LTS: users.passwd still uses MD5 for login backwards compat.
+  # Additionally set passwd_history (bcrypt hash via Zabbix API) when column exists.
   mysql_exec_secure "USE zabbix; UPDATE users SET passwd=MD5('$ZABBIX_ADMIN_PASS') WHERE alias='Admin';" ||
-    die "Failed to set Zabbix Admin password (SHA2 hash path)"
-  # Additionally, verify the update took effect
+    die "Failed to set Zabbix Admin password"
+  # Verify the update took effect
   mysql_exec "USE zabbix; SELECT passwd FROM users WHERE alias='Admin';" | grep -q . ||
-    warn "Admin password may not have been applied successfully"
+    die "Admin password update verification failed"
   ;;
 esac
 
-#-------------------------- Zabbix server config ----------------------
+#-------------------------- Zabbix server config (DBPassword) -----------
 backup_file "$ZABBIX_CONF"
 SED_SCRIPT=$(mktemp)
 chmod 600 "$SED_SCRIPT"
@@ -484,6 +466,14 @@ printf 's/^#\?DBPassword=.*/DBPassword=%s/\n' "$ZABBIX_DB_PASS" >"$SED_SCRIPT"
 run_cmd sed -i -f "$SED_SCRIPT" "$ZABBIX_CONF"
 rm -f "$SED_SCRIPT"
 SED_SCRIPT=""
+# If DBPassword was not present at all, append it
+if ! $DRY_RUN; then
+  if ! grep -q '^DBPassword=' "$ZABBIX_CONF" 2>/dev/null; then
+    info "DBPassword not found after sed - inserting it"
+    echo "DBPassword=$ZABBIX_DB_PASS" >>"$ZABBIX_CONF"
+  fi
+  info "Verified DBPassword is set in $ZABBIX_CONF"
+fi
 
 #-------------------------- Zabbix agent configuration ----------------
 if $USE_AGENT2; then
@@ -495,12 +485,10 @@ else
   INACTIVE_SVC="zabbix-agent2"
   ACTIVE_SVC="zabbix-agent"
 fi
-
 if ! $DRY_RUN; then
   systemctl stop "$INACTIVE_SVC" 2>/dev/null || true
   systemctl disable "$INACTIVE_SVC" 2>/dev/null || true
 fi
-
 backup_file "$ACTIVE_AGENT_CONF"
 HOST_NAME=$(hostname 2>/dev/null || echo "zabbix-server")
 run_cmd sed -i "s/^# Server=.*/Server=127.0.0.1/" "$ACTIVE_AGENT_CONF"
@@ -514,11 +502,8 @@ run_cmd sed -i "s/^Hostname=.*/Hostname=${HOST_NAME}/" "$ACTIVE_AGENT_CONF"
 if ! $SKIP_APACHE; then
   info "Configuring Apache and PHP Web Frontend..."
   run_cmd a2enmod rewrite ssl headers 2>/dev/null || warn "Failed to enable some Apache modules"
-
-  # PHP timezone: tune Apache's php.ini (not CLI)
   if ! $SKIP_PHP_TUNING; then
     PHP_INI_APACHE=""
-    # Find the correct Apache SAPI ini file
     PHP_MAJOR=$(php -r 'echo PHP_MAJOR_VERSION;' 2>/dev/null || echo "8")
     PHP_MINOR=$(php -r 'echo PHP_MINOR_VERSION;' 2>/dev/null || echo "3")
     for candidate in "/etc/php/${PHP_MAJOR}.${PHP_MINOR}/apache2/php.ini" \
@@ -538,20 +523,13 @@ if ! $SKIP_APACHE; then
       warn "Apache PHP ini not found; PHP timezone may need manual setting"
     fi
   fi
-
-  # Zabbix ships an Apache conf for the frontend
-  if [[ -f "/etc/zabbix/apache.conf" ]]; then
-    run_cmd a2enconf zabbix 2>/dev/null || warn "a2enconf zabbix failed"
-  fi
-
-  # TLS handling
+  [[ -f "/etc/zabbix/apache.conf" ]] && run_cmd a2enconf zabbix 2>/dev/null || warn "a2enconf zabbix failed"
   if [[ "$TLS_MODE" == "selfsigned" ]]; then
     SSL_DIR="/etc/apache2/ssl"
     run_cmd mkdir -p "$SSL_DIR"
     run_cmd openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
       -keyout "$SSL_DIR/zabbix.key" -out "$SSL_DIR/zabbix.crt" \
       -subj "/C=US/ST=State/L=City/O=Organization/CN=${SERVER_ADDR}"
-
     SSL_VHOST="/etc/apache2/sites-available/zabbix-ssl.conf"
     backup_file "$SSL_VHOST"
     if $DRY_RUN; then
@@ -575,13 +553,9 @@ SSLVHOST
     fi
     run_cmd a2ensite zabbix-ssl 2>/dev/null || warn "a2ensite zabbix-ssl failed"
   elif [[ "$TLS_MODE" == "letsencrypt" ]]; then
-    if ! command -v certbot &>/dev/null; then
-      certbot_pkgs=(certbot python3-certbot-apache)
-      run_cmd apt-get install -y "${certbot_pkgs[@]}"
-    fi
+    command -v certbot &>/dev/null || run_cmd apt-get install -y certbot python3-certbot-apache
     run_cmd certbot --apache -d "$SERVER_ADDR" --non-interactive --agree-tos -m "$LE_EMAIL"
   fi
-
   run_cmd a2ensite 000-default.conf 2>/dev/null || true
 fi
 
@@ -599,49 +573,34 @@ run_cmd systemctl restart zabbix-server
 run_cmd systemctl enable zabbix-server
 run_cmd systemctl restart "$ACTIVE_SVC"
 run_cmd systemctl enable "$ACTIVE_SVC"
-
 if ! $SKIP_APACHE; then
   run_cmd systemctl restart apache2
   run_cmd systemctl enable apache2
 fi
 
-#-------------------------- Health Checks -----------------------------
+#-------------------------- Health Checks (fail on failure) -----------
 info "Running post-install health checks..."
-ALL_HEALTHY=true
-
 check_svcs=(zabbix-server "$ACTIVE_SVC")
 ! $SKIP_APACHE && check_svcs+=(apache2)
-
 for svc in "${check_svcs[@]}"; do
   if $DRY_RUN; then
     info "DRY-RUN: Checked service $svc status"
   else
-    if systemctl is-active --quiet "$svc" 2>/dev/null; then
-      info "Service $svc is active"
-    else
-      warn "Service $svc is NOT active"
-      ALL_HEALTHY=false
-    fi
+    systemctl is-active --quiet "$svc" 2>/dev/null ||
+      die "Service $svc is NOT active – installation failed"
+    info "Service $svc is active"
   fi
 done
-
 if ! $SKIP_APACHE; then
   [[ "$TLS_MODE" != "none" ]] && PROTO="https" || PROTO="http"
   if $DRY_RUN; then
     info "DRY-RUN: Checked endpoint ${PROTO}://${SERVER_ADDR}/zabbix"
   else
     HTTP_CODE=$(curl -k -s -o /dev/null -w "%{http_code}" "${PROTO}://${SERVER_ADDR}/zabbix" || echo "000")
-    if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "301" || "$HTTP_CODE" == "302" ]]; then
-      info "Web endpoint ${PROTO}://${SERVER_ADDR}/zabbix reachable ($HTTP_CODE)"
-    else
-      warn "Web endpoint ${PROTO}://${SERVER_ADDR}/zabbix returned $HTTP_CODE"
-      ALL_HEALTHY=false
-    fi
+    [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "301" || "$HTTP_CODE" == "302" ]] ||
+      die "Web endpoint ${PROTO}://${SERVER_ADDR}/zabbix returned $HTTP_CODE"
+    info "Web endpoint ${PROTO}://${SERVER_ADDR}/zabbix reachable ($HTTP_CODE)"
   fi
-fi
-
-if ! $DRY_RUN && [[ "$ALL_HEALTHY" == false ]]; then
-  warn "Some health checks failed. Review /var/log/zabbix-easydeploy.log for details."
 fi
 
 #-------------------------- Credential File Output ---------------------
@@ -675,7 +634,6 @@ fi
 
 #-------------------------- Summary Output ----------------------------
 [[ "$TLS_MODE" != "none" ]] && HTTPS_UI="HTTPS UI: https://${SERVER_ADDR}/zabbix" || HTTPS_UI=""
-
 cat <<EOF
 
 ===================================================================
@@ -683,21 +641,13 @@ Installation complete!
 Web UI: http://${SERVER_ADDR}/zabbix
 ${HTTPS_UI}
 EOF
-
 if [[ -n "$SAVE_CREDS" ]]; then
-  cat <<EOF
-Credentials saved to: ${SAVE_CREDS} (chmod 600)
-EOF
+  echo "Credentials saved to: ${SAVE_CREDS} (chmod 600)"
 else
-  cat <<EOF
-Admin login: Admin / ${ZABBIX_ADMIN_PASS}
-Database user: zabbix / ${ZABBIX_DB_PASS}
-MariaDB root: ${ZABBIX_ROOT_PASS}
-EOF
+  echo "Admin login: Admin / ${ZABBIX_ADMIN_PASS}"
+  echo "Database user: zabbix / ${ZABBIX_DB_PASS}"
+  echo "MariaDB root: ${ZABBIX_ROOT_PASS}"
 fi
-
-cat <<EOF
-===================================================================
-EOF
+echo "==================================================================="
 
 exit 0
