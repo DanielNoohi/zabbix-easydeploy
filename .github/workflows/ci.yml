@@ -24,17 +24,5 @@ jobs:
     - name: shfmt
       run: shfmt -d -l -i 2 zabbix-auto-install.sh
     
-    - name: Set up test helpers
-      run: |
-        mkdir -p test/test_helper
-        for i in 1 2 3; do
-          git clone --depth 1 https://github.com/bats-core/bats-support.git test/test_helper/bats-support && break
-          sleep 2
-        done
-        for i in 1 2 3; do
-          git clone --depth 1 https://github.com/bats-core/bats-assert.git test/test_helper/bats-assert && break
-          sleep 2
-        done
-    
     - name: Bats tests
       run: bats test/
