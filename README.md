@@ -9,10 +9,10 @@
 *   **Interactive & Unattended Modes** – Run interactively or via CLI flags for CI/CD.
 *   **Dry‑Run Mode** – Preview actions without executing (`--dry-run`).
 *   **Idempotent & Safe** – Safe to re-run: reuses existing DB/admin passwords and credential file, skips schema import when the `zabbix` DB is already populated, backs up configs before changes.
-*   **Secure Credential Handling** – Secrets never appear in command-line arguments or logs: MySQL runs via `MYSQL_PWD`/option files, `sed` via script file, all output masked (`[REDACTED]`). Strong 32‑char random passwords (alphanumeric, pipefail‑safe).
+*   **Secure Credential Handling** – Secrets never appear in command-line arguments or logs: MySQL runs via secured option files, `sed` via script files, bcrypt hash generation reads the password from stdin, all output masked (`[REDACTED]`). Strong random passwords (alphanumeric).
 *   **TLS Options** – No TLS, self‑signed certificate, or Let's Encrypt (if `certbot` available).
 *   **Firewall** – Optional UFW configuration for HTTP/HTTPS and Zabbix ports.
-*   **Zabbix Versions** – Supports Zabbix 6.0 LTS and 7.0 LTS (default 7.0).
+*   **Zabbix Versions** – Supports Zabbix 6.0 LTS and 7.0 LTS (default 7.0). Admin password is stored as **bcrypt** on all supported versions (6.0 and 7.0+); the login column is auto-detected (`alias` on 6.0, `username` on 7.0+).
 *   **Agent Choice** – Install Zabbix Agent 1 or Agent 2 (`--agent2`).
 *   **Web Server Choice** – Skip Apache if using external web server (`--skip-apache`).
 *   **PHP Tuning** – Optional timezone and module configuration.

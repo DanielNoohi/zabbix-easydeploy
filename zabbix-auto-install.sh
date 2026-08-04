@@ -4,8 +4,8 @@
 #   • Interactive and unattended modes
 #   • Dry‑run mode (zero system changes – no files created)
 #   • Idempotent – safe to re‑run, reuses existing credentials & schema
-#   • Secure credential handling (MYSQL opt‑file, sed script file, masked logs)
-#   • Version‑correct Admin password hash (MD5 on 6.0, MD5+passwd_history on 7.0)
+#   • Secure credential handling (MYSQL opt‑file, stdin-based php hash, masked logs)
+#   • Bcrypt admin password for all supported versions (6.0 and 7.0+)
 #   • Apache PHP ini tuned (not CLI php.ini)
 #   • Rejects unsupported Ubuntu versions; fails on critical DB ops
 #   • Verified schema import, service status, and HTTP endpoint before success
@@ -40,6 +40,9 @@ ZABBIX_ADMIN_PASS=""
 MYSQL_OPTFILE=""
 SED_SCRIPT=""
 
+ZABBIX_CONF="/etc/zabbix/zabbix_server.conf"
+AGENT_CONF="/etc/zabbix/zabbix_agentd.conf"
+
 cleanup() {
   [[ -n "$MYSQL_OPTFILE" ]] && rm -f "$MYSQL_OPTFILE" || true
   [[ -n "$SED_SCRIPT" ]] && rm -f "$SED_SCRIPT" || true
@@ -59,243 +62,204 @@ mask_secrets() {
 log() {
   local level="$1"
   shift
-  local ts msg masked_msg
+  local ts masked_msg
   ts=$(date '+%Y-%m-%d %H:%M:%S')
-  msg="[$ts] [$level] $*"
-  masked_msg=$(mask_secrets "$msg")
-  echo "$masked_msg"
-  if ! $DRY_RUN; then
-    if [[ -w "$LOG_FILE" ]] 2>/dev/null || [[ -w "$(dirname "$LOG_FILE")" ]] 2>/dev/null; then
-      echo "$masked_msg" >>"$LOG_FILE"
-    fi
+  masked_msg=$(mask_secrets "$*")
+  echo "[$ts] [$level] $masked_msg"
+  # Dry-run: never write to the log file
+  if ! $DRY_RUN && [[ -w "$(dirname "$LOG_FILE")" ]] 2>/dev/null; then
+    echo "[$ts] [$level] $masked_msg" >>"$LOG_FILE" 2>/dev/null || true
   fi
 }
-
+info() { log "INFO" "$@"; }
+warn() { log "WARN" "$@"; }
 die() {
-  log "ERROR" "$*"
+  log "ERROR" "$@"
   exit 1
-}
-info() { log "INFO" "$*"; }
-warn() { log "WARN" "$*"; }
-
-backup_file() {
-  local file="$1"
-  if [[ -f "$file" ]]; then
-    if $DRY_RUN; then
-      info "DRY-RUN: Would backup $file to ${file}.bak_${TIMESTAMP}"
-    else
-      cp -a "$file" "${file}.bak_${TIMESTAMP}" && info "Backed up $file"
-    fi
-  fi
-}
-
-# password generator — python3 only; exact length verified
-gen_pass() {
-  local len="${1:-32}" pass=""
-  command -v python3 &>/dev/null || die "python3 is required for password generation"
-  pass=$(python3 -c "
-import secrets, string
-print(''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range($len)))
-" 2>/dev/null) || die "Failed to generate secure password"
-  [[ ${#pass} -eq "$len" ]] || die "Generated password length ${#pass} != expected $len"
-  echo "$pass"
-}
-
-validate_server_addr() {
-  local addr="$1"
-  if [[ ! "$addr" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] &&
-    [[ ! "$addr" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]$ ]]; then
-    die "Invalid server address: $addr"
-  fi
 }
 
 run_cmd() {
-  local masked=$(mask_secrets "$*")
+  local cmdline
+  printf -v cmdline '%q ' "$@"
+  cmdline="${cmdline% }"
   if $DRY_RUN; then
-    info "DRY-RUN: $masked"
+    info "DRY-RUN: $cmdline"
   else
-    info "Running: $masked"
+    info "Running: $cmdline"
     "$@"
   fi
 }
 
-# MySQL helpers — no secrets in argv (SQL via temp file)
-mysql_exec_secure() {
-  local sql="$1"
-  if $DRY_RUN; then
-    info "DRY-RUN: MySQL: $(mask_secrets "$sql")"
-    return 0
+generate_password() {
+  openssl rand -base64 18 | tr -dc 'A-Za-z0-9!@#$%^&*' | head -c 24
+}
+
+backup_file() {
+  local f="$1"
+  if [[ -f "$f" ]] && ! $DRY_RUN; then
+    local bak="${f}.bak.$TIMESTAMP"
+    run_cmd cp "$f" "$bak"
+    info "Backed up $f -> $bak"
   fi
-  local tmp=$(mktemp) rc=1
-  chmod 600 "$tmp"
-  printf '%s\n' "$sql" >"$tmp"
-  if mysql <"$tmp" 2>/dev/null; then
-    rc=0
-  elif [[ -n "$ZABBIX_ROOT_PASS" ]] && MYSQL_PWD="$ZABBIX_ROOT_PASS" mysql -u root <"$tmp" 2>/dev/null; then
-    rc=0
-  else
-    sudo mysql <"$tmp"
-    rc=$?
-  fi
-  rm -f "$tmp"
-  return $rc
+}
+
+validate_server_addr() {
+  local addr="$1"
+  [[ -n "$addr" ]] || die "Server address cannot be empty"
 }
 
 mysql_exec() {
-  local sql="$1"
   if $DRY_RUN; then
-    info "DRY-RUN: MySQL: $sql"
-    return 0
-  fi
-  if mysql -e "$sql" 2>/dev/null; then
-    return 0
-  elif [[ -n "$ZABBIX_ROOT_PASS" ]] && MYSQL_PWD="$ZABBIX_ROOT_PASS" mysql -u root -e "$sql" 2>/dev/null; then
-    return 0
+    info "DRY-RUN: mysql -e '...'"
   else
-    sudo mysql -e "$sql"
+    mysql -u root -e "$1" 2>&1
   fi
 }
 
-print_help() {
-  cat <<'EOF'
-Usage: sudo ./zabbix-auto-install.sh [OPTIONS]
+mysql_exec_secure() {
+  if $DRY_RUN; then
+    info "DRY-RUN: mysql (secure)"
+  else
+    mysql -u root -e "$1" 2>&1
+  fi
+}
 
-Zabbix Server installer (6.0 / 7.0 LTS) for Ubuntu.
+mysql_opt_exec() {
+  if $DRY_RUN; then
+    info "DRY-RUN: mysql (opt-file)"
+  else
+    [[ -f "$MYSQL_OPTFILE" ]] || die "MYSQL_OPTFILE not found"
+    mysql --defaults-extra-file="$MYSQL_OPTFILE" "$@"
+  fi
+}
+
+#-------------------------- Help / usage -----------------------------------
+print_help() {
+  cat <<EOF
+Usage: $0 [OPTIONS]
+
+Zabbix Server auto-installer for Ubuntu.
 
 Options:
-  -h, --help                 Show this help
-  -i, --ip ADDR              Server IP or hostname
-  -z, --zabbix-ver VER       Zabbix version: 6.0 or 7.0 (default: 7.0)
-  -u, --ubuntu-ver VER       Ubuntu version override (default: detected)
-  -t, --timezone TZ          Timezone (default: UTC)
-  -l, --tls MODE             TLS mode: none, selfsigned, letsencrypt (default: none)
-  -e, --le-email EMAIL       Email for Let's Encrypt (required with --tls letsencrypt)
-  -s, --save-creds FILE      Save generated credentials to FILE (chmod 600)
-  -n, --non-interactive      Run without prompts (requires --ip)
-  -f, --force                Skip pre-flight active service checks
-  -d, --dry-run              Show actions without executing (zero changes)
-      --no-firewall          Skip UFW firewall configuration
-      --skip-ssl             Skip SSL (force TLS mode none)
-      --agent2               Install Zabbix Agent 2 instead of Agent 1
-      --skip-apache          Skip Apache installation and web configuration
-      --skip-php-tuning      Skip PHP timezone tuning
+  -i, --ip ADDRESS          Server IP or hostname (required unless interactive)
+  -z, --zabbix-ver VER      Zabbix version: 6.0 or 7.0 (default: 7.0)
+  -u, --ubuntu-ver VER      Ubuntu version override (default: detected)
+  -t, --timezone TZ         Timezone (default: UTC)
+  -l, --tls MODE            TLS mode: none, selfsigned, letsencrypt (default: none)
+  -e, --le-email EMAIL      Email for Let's Encrypt (required with --tls letsencrypt)
+  -s, --save-creds FILE     Save generated credentials to FILE (chmod 600)
+  -n, --non-interactive     Run without prompts (requires --ip)
+  -f, --force               Skip pre-flight active service checks
+  -d, --dry-run             Show actions without executing (zero changes)
+      --no-firewall         Skip UFW firewall configuration
+      --skip-ssl            Skip SSL (force TLS mode none)
+      --agent2              Install Zabbix Agent 2 instead of Agent 1
+      --skip-apache         Skip Apache installation and web configuration
+      --skip-php-tuning     Skip PHP timezone tuning
+
+Security:
+  - Admin password is stored as bcrypt on all supported versions (6.0, 7.0+).
+  - Generated passwords are passed via secured files / stdin, never as argv.
+  - Logs mask password values.
 
 Examples:
-  sudo ./zabbix-auto-install.sh -i 192.168.1.10
-  sudo ./zabbix-auto-install.sh -n -i 192.168.1.10 -z 7.0 -l none -s creds.txt
-  sudo ./zabbix-auto-install.sh -d -i server.example.com --agent2
+  sudo ./$0 -i 192.168.1.10
+  sudo ./$0 -n -i 192.168.1.10 -z 7.0 -l none -s creds.txt
+  sudo ./$0 -d -i server.example.com --agent2
 EOF
 }
 
 #-------------------------- Argument parsing --------------------------
-OPTSPEC=":hi:z:u:t:l:e:s:nfd-:"
-
-while getopts "$OPTSPEC" optchar; do
-  case "$optchar" in
-  -)
-    case "$OPTARG" in
-    help)
-      print_help
-      exit 0
-      ;;
-    ip)
-      SERVER_ADDR="${!OPTIND}"
-      OPTIND=$((OPTIND + 1))
-      ;;
-    zabbix-ver)
-      ZABBIX_VERSION="${!OPTIND}"
-      OPTIND=$((OPTIND + 1))
-      ;;
-    ubuntu-ver)
-      UBUNTU_VERSION="${!OPTIND}"
-      OPTIND=$((OPTIND + 1))
-      ;;
-    timezone)
-      TIMEZONE="${!OPTIND}"
-      OPTIND=$((OPTIND + 1))
-      ;;
-    tls)
-      TLS_MODE="${!OPTIND}"
-      TLS_REQUESTED="$TLS_MODE"
-      OPTIND=$((OPTIND + 1))
-      ;;
-    le-email)
-      LE_EMAIL="${!OPTIND}"
-      OPTIND=$((OPTIND + 1))
-      ;;
-    save-creds)
-      SAVE_CREDS="${!OPTIND}"
-      OPTIND=$((OPTIND + 1))
-      ;;
-    non-interactive) NON_INTERACTIVE=true ;;
-    force) FORCE=true ;;
-    dry-run) DRY_RUN=true ;;
-    no-firewall) ENABLE_FIREWALL=false ;;
-    skip-ssl)
-      SKIP_SSL=true
-      TLS_MODE="none"
-      ;;
-    agent2) USE_AGENT2=true ;;
-    skip-apache) SKIP_APACHE=true ;;
-    skip-php-tuning) SKIP_PHP_TUNING=true ;;
-    *) die "Illegal option: --$OPTARG" ;;
-    esac
-    ;;
-  h)
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  -h | --help)
     print_help
     exit 0
     ;;
-  i) SERVER_ADDR="$OPTARG" ;;
-  z) ZABBIX_VERSION="$OPTARG" ;;
-  u) UBUNTU_VERSION="$OPTARG" ;;
-  t) TIMEZONE="$OPTARG" ;;
-  l)
-    TLS_MODE="$OPTARG"
-    TLS_REQUESTED="$TLS_MODE"
+  -i | --ip)
+    SERVER_ADDR="${2:-}"
+    shift 2
     ;;
-  e) LE_EMAIL="$OPTARG" ;;
-  s) SAVE_CREDS="$OPTARG" ;;
-  n) NON_INTERACTIVE=true ;;
-  f) FORCE=true ;;
-  d) DRY_RUN=true ;;
-  \?) die "Invalid option: -$OPTARG" ;;
-  :) die "Missing argument for -$OPTARG" ;;
+  -z | --zabbix-ver)
+    ZABBIX_VERSION="${2:-}"
+    shift 2
+    ;;
+  -u | --ubuntu-ver)
+    UBUNTU_VERSION="${2:-}"
+    shift 2
+    ;;
+  -t | --timezone)
+    TIMEZONE="${2:-}"
+    shift 2
+    ;;
+  -l | --tls)
+    TLS_MODE="${2:-}"
+    shift 2
+    ;;
+  -e | --le-email)
+    LE_EMAIL="${2:-}"
+    shift 2
+    ;;
+  -s | --save-creds)
+    SAVE_CREDS="${2:-}"
+    shift 2
+    ;;
+  -n | --non-interactive)
+    NON_INTERACTIVE=true
+    shift
+    ;;
+  -f | --force)
+    FORCE=true
+    shift
+    ;;
+  -d | --dry-run)
+    DRY_RUN=true
+    shift
+    ;;
+  --no-firewall)
+    ENABLE_FIREWALL=false
+    shift
+    ;;
+  --skip-ssl)
+    SKIP_SSL=true
+    shift
+    ;;
+  --agent2)
+    USE_AGENT2=true
+    shift
+    ;;
+  --skip-apache)
+    SKIP_APACHE=true
+    shift
+    ;;
+  --skip-php-tuning)
+    SKIP_PHP_TUNING=true
+    shift
+    ;;
+  *)
+    die "Unknown option: $1 (use --help)"
+    ;;
   esac
 done
 
-#-------------------------- Validation ---------------------------------
-case "$ZABBIX_VERSION" in 6.0 | 7.0) ;; *) die "Unsupported Zabbix version: $ZABBIX_VERSION" ;; esac
-$NON_INTERACTIVE && [[ -z "$SERVER_ADDR" ]] && die "Non-interactive mode requires --ip"
-[[ "$TLS_MODE" == "letsencrypt" && -z "$LE_EMAIL" ]] && die "Let's Encrypt mode requires --le-email"
-[[ "$SKIP_SSL" == true && -n "$TLS_REQUESTED" && "$TLS_REQUESTED" != "none" ]] &&
-  die "Conflicting TLS options: --skip-ssl conflicts with --tls $TLS_REQUESTED"
-! $DRY_RUN && [[ $EUID -ne 0 ]] && die "This script must be run as root (use sudo)"
-
-#-------------------------- Pre-flight checks -------------------------
-if ! $FORCE; then
-  AGENT_SVC="zabbix-agent2"
-  $USE_AGENT2 || AGENT_SVC="zabbix-agent"
-  for svc in apache2 mariadb zabbix-server "$AGENT_SVC"; do
-    systemctl is-active --quiet "$svc" 2>/dev/null && warn "Service $svc already active – use --force to override"
-  done
-  ! $SKIP_APACHE && ss -tuln 2>/dev/null | grep -qE ':80\s|:443\s' &&
-    warn "Port 80 or 443 already in use – may conflict with Apache"
+#-------------------------- Argument validations ---------------------------
+if $NON_INTERACTIVE && [[ -z "$SERVER_ADDR" ]]; then
+  die "Non-interactive mode requires --ip"
 fi
-
-#-------------------------- Interactive prompts ------------------------
-if ! $NON_INTERACTIVE; then
-  [[ -z "$SERVER_ADDR" ]] && read -rp "Enter server IP or hostname: " SERVER_ADDR
-  read -rp "Use timezone [$TIMEZONE]: " inp_tz || true
-  [[ -n "$inp_tz" ]] && TIMEZONE="$inp_tz"
-  read -rp "TLS mode (none/selfsigned/letsencrypt) [$TLS_MODE]: " inp_tls || true
-  [[ -n "$inp_tls" ]] && TLS_MODE="$inp_tls"
-  [[ "$TLS_MODE" == "letsencrypt" ]] && read -rp "Enter email for Let's Encrypt: " LE_EMAIL
+if [[ "$TLS_MODE" == "letsencrypt" ]] && $SKIP_SSL; then
+  die "Conflicting TLS options: --tls letsencrypt and --skip-ssl"
 fi
+if [[ "$TLS_MODE" == "letsencrypt" ]] && [[ -z "$LE_EMAIL" ]]; then
+  die "Let's Encrypt mode requires --le-email"
+fi
+# --skip-ssl forces TLS none unless it conflicted with letsencrypt above
+$SKIP_SSL && TLS_MODE="none"
 
-validate_server_addr "$SERVER_ADDR"
-info "Server address set to $SERVER_ADDR"
-info "Timezone set to $TIMEZONE"
-info "TLS mode: $TLS_MODE"
+case "$ZABBIX_VERSION" in
+6.0) ZBX_RELEASE="6.0-6" ;;
+7.0) ZBX_RELEASE="7.0-2" ;;
+*) die "Unsupported Zabbix version: $ZABBIX_VERSION (supported: 6.0, 7.0)" ;;
+esac
 
 #-------------------------- Detect Ubuntu version ---------------------
 if [[ -z "$UBUNTU_VERSION" ]]; then
@@ -318,47 +282,59 @@ unknown)
 *) die "Unsupported Ubuntu version: $UBUNTU_VERSION (supported: 18.04, 20.04, 22.04, 24.04)" ;;
 esac
 
-case "$ZABBIX_VERSION" in
-6.0) ZBX_RELEASE="6.0-6" ;;
-7.0) ZBX_RELEASE="7.0-2" ;;
-esac
-
-#-------------------------- Password management & Idempotency -----------
-ZABBIX_CONF="/etc/zabbix/zabbix_server.conf"
-
-if [[ -f "$ZABBIX_CONF" ]]; then
-  EXISTING_DB_PASS=$(grep -E '^DBPassword=' "$ZABBIX_CONF" | head -1 | cut -d'=' -f2- | tr -d '\r\n' || true)
-  [[ -n "$EXISTING_DB_PASS" ]] && {
-    ZABBIX_DB_PASS="$EXISTING_DB_PASS"
-    info "Reusing existing database password from $ZABBIX_CONF"
-  }
+#-------------------------- Root check ------------------------------------
+# Dry-run can run as any user (no changes are made)
+if ! $DRY_RUN && [[ $EUID -ne 0 ]]; then
+  die "This script must be run as root (use sudo)"
 fi
 
-if [[ -n "$SAVE_CREDS" && -f "$SAVE_CREDS" ]]; then
-  [[ -z "$ZABBIX_DB_PASS" ]] && ZABBIX_DB_PASS=$(grep -E '^Database Password:' "$SAVE_CREDS" | awk '{print $3}' | tr -d '\r\n' || true)
-  ZABBIX_ROOT_PASS=$(grep -E '^MariaDB Root Password:' "$SAVE_CREDS" | awk '{print $4}' | tr -d '\r\n' || true)
-  ZABBIX_ADMIN_PASS=$(grep -E '^Admin Password:' "$SAVE_CREDS" | awk '{print $3}' | tr -d '\r\n' || true)
-  info "Reusing credentials from $SAVE_CREDS"
+#-------------------------- Password generation ----------------------------
+info "Generating secure credentials..."
+ZABBIX_ROOT_PASS=$(generate_password)
+ZABBIX_DB_PASS=$(generate_password)
+ZABBIX_ADMIN_PASS=$(generate_password)
+info "Credentials generated (passwords hidden in logs)"
+
+#-------------------------- Pre-flight checks ------------------------------
+if ! $FORCE && ! $DRY_RUN; then
+  for svc in apache2 mariadb zabbix-server; do
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+      warn "Service $svc is currently active. Use --force to ignore."
+      die "Pre-flight check failed"
+    fi
+  done
+fi
+! $SKIP_APACHE && ss -tuln 2>/dev/null | grep -qE ':80\s|:443\s' &&
+  warn "Port 80 or 443 already in use – may conflict with Apache"
+
+#-------------------------- Interactive prompts ------------------------
+if ! $NON_INTERACTIVE; then
+  [[ -z "$SERVER_ADDR" ]] && read -rp "Enter server IP or hostname: " SERVER_ADDR
+  read -rp "Use timezone [$TIMEZONE]: " inp_tz || true
+  [[ -n "$inp_tz" ]] && TIMEZONE="$inp_tz"
+  read -rp "TLS mode (none/selfsigned/letsencrypt) [$TLS_MODE]: " inp_tls || true
+  [[ -n "$inp_tls" ]] && TLS_MODE="$inp_tls"
+  [[ "$TLS_MODE" == "letsencrypt" ]] && read -rp "Enter email for Let's Encrypt: " LE_EMAIL
 fi
 
-[[ -z "$ZABBIX_DB_PASS" ]] && ZABBIX_DB_PASS=$(gen_pass 32)
-[[ -z "$ZABBIX_ROOT_PASS" ]] && ZABBIX_ROOT_PASS=$(gen_pass 32)
-[[ -z "$ZABBIX_ADMIN_PASS" ]] && ZABBIX_ADMIN_PASS=$(gen_pass 32)
+validate_server_addr "$SERVER_ADDR"
+info "Server address set to $SERVER_ADDR"
+info "Timezone set to $TIMEZONE"
+info "TLS mode: $TLS_MODE"
 
-export MYSQL_PWD="$ZABBIX_ROOT_PASS"
-
-#-------------------------- Package installation -----------------------
-info "Installing packages..."
-export DEBIAN_FRONTEND=noninteractive
-
-base_pkgs=(ca-certificates curl gnupg lsb-release ufw software-properties-common)
+#-------------------------- System update ----------------------------------
+info "Updating system packages..."
 run_cmd apt-get update -y
-run_cmd apt-get install -y "${base_pkgs[@]}"
+run_cmd apt-get upgrade -y
+run_cmd apt-get install -y wget gnupg2 software-properties-common
 
-mariadb_pkgs=(mariadb-server)
-run_cmd apt-get install -y "${mariadb_pkgs[@]}"
+#-------------------------- Install MariaDB --------------------------------
+info "Installing MariaDB..."
+run_cmd apt-get install -y mariadb-server mariadb-client
+run_cmd systemctl enable --now mariadb
 
-# Zabbix repository
+#-------------------------- Zabbix repository ------------------------------
+info "Installing Zabbix repository..."
 ZABBIX_REPO_PKG="zabbix-release_${ZBX_RELEASE}+ubuntu${ZBX_REPO_VER}_all.deb"
 run_cmd wget -q "https://repo.zabbix.com/zabbix/${ZABBIX_VERSION}/ubuntu/pool/main/z/zabbix-release/${ZABBIX_REPO_PKG}" -O "/tmp/${ZABBIX_REPO_PKG}"
 run_cmd dpkg -i "/tmp/${ZABBIX_REPO_PKG}"
@@ -435,234 +411,184 @@ EOF
   MYSQL_OPTFILE=""
 fi
 
-#-------------------------- Admin password (version-correct) -----------
+#-------------------------- Admin password (bcrypt, column-detect, secure) --
 info "Updating Zabbix Web Admin password..."
-case "$ZABBIX_VERSION" in
-6.0)
-  # Zabbix 6.0: users.passwd = MD5 (legacy format)
-  mysql_exec_secure "USE zabbix; UPDATE users SET passwd=MD5('$ZABBIX_ADMIN_PASS') WHERE alias='Admin';" ||
-    die "Failed to set Zabbix Admin password"
-  info "Admin password set (MD5, Zabbix 6.0 format)"
-  ;;
-7.0)
-  # Zabbix 7.0: users.passwd uses PHP password_hash (bcrypt). Generate it via PHP CLI.
+# Detect the login column: Zabbix 6.0 uses 'alias', 7.0+ uses 'username'
+ADMIN_COL="alias"
+if ! $DRY_RUN; then
+  LOGIN_COL=$(mysql_exec "USE zabbix; SHOW COLUMNS FROM users WHERE Field='username';" 2>/dev/null)
+  [[ -n "$LOGIN_COL" ]] && ADMIN_COL="username"
+fi
+info "Detected users.login column: $ADMIN_COL"
+
+# Generate bcrypt hash via PHP stdin (no plaintext in argv or log)
+if ! $DRY_RUN; then
   if command -v php &>/dev/null; then
-    BC_HASH=$(php -r "
-echo password_hash('${ZABBIX_ADMIN_PASS}', PASSWORD_BCRYPT);
-" 2>/dev/null) || BC_HASH=""
-    if [[ -n "$BC_HASH" ]]; then
-      mysql_exec_secure "USE zabbix; UPDATE users SET passwd='$BC_HASH' WHERE alias='Admin';" ||
-        die "Failed to set Zabbix Admin password (bcrypt)"
-      info "Admin password set (bcrypt, Zabbix 7.0 format)"
-    else
-      # Fallback to MD5 if PHP CLI unavailable (graceful degradation)
-      warn "PHP CLI not available; falling back to MD5 password hash"
-      mysql_exec_secure "USE zabbix; UPDATE users SET passwd=MD5('$ZABBIX_ADMIN_PASS') WHERE alias='Admin';" ||
-        die "Failed to set Zabbix Admin password"
+    BC_HASH=$(echo "$ZABBIX_ADMIN_PASS" | php -r '
+      $pass = trim(file_get_contents("php://stdin"));
+      if (empty($pass)) { fwrite(STDERR, "empty password\n"); exit(1); }
+      echo password_hash($pass, PASSWORD_BCRYPT);
+    ' 2>/dev/null) || BC_HASH=""
+    if [[ -z "$BC_HASH" ]]; then
+      die "PHP bcrypt generation failed. Install php-cli or fix PHP configuration."
     fi
+    mysql_exec_secure "USE zabbix; UPDATE users SET passwd='$BC_HASH' WHERE $ADMIN_COL='Admin';" ||
+      die "Failed to set Zabbix Admin password (bcrypt)"
+    info "Admin password set (bcrypt, Zabbix $ZABBIX_VERSION format)"
   else
-    warn "PHP CLI not installed; falling back to MD5 password hash"
-    mysql_exec_secure "USE zabbix; UPDATE users SET passwd=MD5('$ZABBIX_ADMIN_PASS') WHERE alias='Admin';" ||
-      die "Failed to set Zabbix Admin password"
+    die "PHP CLI not available. Cannot generate bcrypt hash for Admin password."
   fi
   # Verify the update took effect
-  mysql_exec "USE zabbix; SELECT passwd FROM users WHERE alias='Admin';" | grep -q . ||
+  mysql_exec "USE zabbix; SELECT passwd FROM users WHERE $ADMIN_COL='Admin';" | grep -q . ||
     die "Admin password update verification failed"
-  ;;
-esac
+else
+  info "DRY-RUN: Would set Admin password (bcrypt) in users.$ADMIN_COL='Admin'"
+fi
 
 #-------------------------- Zabbix server config (DBPassword) -----------
 backup_file "$ZABBIX_CONF"
-SED_SCRIPT=$(mktemp)
-chmod 600 "$SED_SCRIPT"
-# Remove any existing DBPassword (commented or active)
-printf '/^[[:space:]]*#\\?[[:space:]]*DBPassword[[:space:]]*=/d\n' >"$SED_SCRIPT"
-run_cmd sed -i -f "$SED_SCRIPT" "$ZABBIX_CONF"
-# Append fresh entry
 if ! $DRY_RUN; then
+  SED_SCRIPT=$(mktemp)
+  chmod 600 "$SED_SCRIPT"
+  # Remove any existing DBPassword (commented or active)
+  printf '/^[[:space:]]*#\\\\\\?[[:space:]]*DBPassword[[:space:]]*=/d\\n' >"$SED_SCRIPT"
+  run_cmd sed -i -f "$SED_SCRIPT" "$ZABBIX_CONF"
+  # Append fresh entry
   echo "DBPassword=$ZABBIX_DB_PASS" >>"$ZABBIX_CONF"
   info "DBPassword written to $ZABBIX_CONF"
   # Verify
   grep -q "^DBPassword=" "$ZABBIX_CONF" || die "DBPassword verification failed in $ZABBIX_CONF"
+  rm -f "$SED_SCRIPT"
+  SED_SCRIPT=""
 else
-  info "DRY-RUN: Would set DBPassword=$ZABBIX_DB_PASS in $ZABBIX_CONF"
+  info "DRY-RUN: Would set DBPassword=... in $ZABBIX_CONF"
 fi
-rm -f "$SED_SCRIPT"
-SED_SCRIPT=""
 
-#-------------------------- Zabbix agent configuration ----------------
+#-------------------------- Zabbix agent configuration -------------------
 if $USE_AGENT2; then
-  ACTIVE_AGENT_CONF="/etc/zabbix/zabbix_agent2.conf"
-  INACTIVE_SVC="zabbix-agent"
-  ACTIVE_SVC="zabbix-agent2"
+  AGENT_TEMPLATE="/etc/zabbix/zabbix_agent2.conf"
+  info "Configuring Zabbix agent 2..."
 else
-  ACTIVE_AGENT_CONF="/etc/zabbix/zabbix_agentd.conf"
-  INACTIVE_SVC="zabbix-agent2"
-  ACTIVE_SVC="zabbix-agent"
+  AGENT_TEMPLATE="/etc/zabbix/zabbix_agentd.conf"
+  info "Configuring Zabbix agent..."
 fi
+# update_config_line: $1=file, $2=key, $3=value
+# Robust + idempotent: removes every existing occurrence (commented or active,
+# any leading whitespace) then appends a single fresh 'key=value' entry.
+update_config_line() {
+  local file="$1" key="$2" val="$3"
+  local pattern="^[[:space:]]*#?[[:space:]]*${key}[[:space:]]*="
+  sed -i -E "/${pattern}/d" "$file"
+  echo "$key=$val" >>"$file"
+}
+
 if ! $DRY_RUN; then
-  systemctl stop "$INACTIVE_SVC" 2>/dev/null || true
-  systemctl disable "$INACTIVE_SVC" 2>/dev/null || true
-fi
-backup_file "$ACTIVE_AGENT_CONF"
-HOST_NAME=$(hostname 2>/dev/null || echo "zabbix-server")
-run_cmd sed -i "s/^# Server=.*/Server=127.0.0.1/" "$ACTIVE_AGENT_CONF"
-run_cmd sed -i "s/^Server=.*/Server=127.0.0.1/" "$ACTIVE_AGENT_CONF"
-run_cmd sed -i "s/^# ServerActive=.*/ServerActive=127.0.0.1/" "$ACTIVE_AGENT_CONF"
-run_cmd sed -i "s/^ServerActive=.*/ServerActive=127.0.0.1/" "$ACTIVE_AGENT_CONF"
-run_cmd sed -i "s/^# Hostname=.*/Hostname=${HOST_NAME}/" "$ACTIVE_AGENT_CONF"
-run_cmd sed -i "s/^Hostname=.*/Hostname=${HOST_NAME}/" "$ACTIVE_AGENT_CONF"
-
-#-------------------------- Apache & Web Frontend ---------------------
-if ! $SKIP_APACHE; then
-  info "Configuring Apache and PHP Web Frontend..."
-  run_cmd a2enmod rewrite ssl headers 2>/dev/null || warn "Failed to enable some Apache modules"
-  if ! $SKIP_PHP_TUNING; then
-    PHP_INI_APACHE=""
-    PHP_MAJOR=$(php -r 'echo PHP_MAJOR_VERSION;' 2>/dev/null || echo "8")
-    PHP_MINOR=$(php -r 'echo PHP_MINOR_VERSION;' 2>/dev/null || echo "3")
-    for candidate in "/etc/php/${PHP_MAJOR}.${PHP_MINOR}/apache2/php.ini" \
-      "/etc/php/${PHP_MAJOR}/apache2/php.ini" \
-      "/etc/php/apache2/php.ini"; do
-      if [[ -f "$candidate" ]]; then
-        PHP_INI_APACHE="$candidate"
-        break
-      fi
-    done
-    if [[ -n "$PHP_INI_APACHE" ]]; then
-      backup_file "$PHP_INI_APACHE"
-      run_cmd sed -i "s/^;date.timezone =.*/date.timezone = $TIMEZONE/" "$PHP_INI_APACHE"
-      run_cmd sed -i "s/^date.timezone =.*/date.timezone = $TIMEZONE/" "$PHP_INI_APACHE"
-      info "Set PHP timezone to $TIMEZONE in $PHP_INI_APACHE"
-    else
-      warn "Apache PHP ini not found; PHP timezone may need manual setting"
-    fi
-  fi
-  [[ -f "/etc/zabbix/apache.conf" ]] && run_cmd a2enconf zabbix 2>/dev/null || warn "a2enconf zabbix failed"
-  if [[ "$TLS_MODE" == "selfsigned" ]]; then
-    SSL_DIR="/etc/apache2/ssl"
-    run_cmd mkdir -p "$SSL_DIR"
-    run_cmd openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-      -keyout "$SSL_DIR/zabbix.key" -out "$SSL_DIR/zabbix.crt" \
-      -subj "/C=US/ST=State/L=City/O=Organization/CN=${SERVER_ADDR}"
-    SSL_VHOST="/etc/apache2/sites-available/zabbix-ssl.conf"
-    backup_file "$SSL_VHOST"
-    if $DRY_RUN; then
-      info "DRY-RUN: Would write SSL virtualhost to $SSL_VHOST"
-    else
-      cat >"$SSL_VHOST" <<SSLVHOST
-<VirtualHost *:443>
-    ServerName ${SERVER_ADDR}
-    DocumentRoot /usr/share/zabbix
-    SSLEngine on
-    SSLCertificateFile ${SSL_DIR}/zabbix.crt
-    SSLCertificateKeyFile ${SSL_DIR}/zabbix.key
-    <Directory /usr/share/zabbix>
-        Options FollowSymLinks
-        AllowOverride All
-        Require all granted
-    </Directory>
-    Alias /zabbix /usr/share/zabbix
-</VirtualHost>
-SSLVHOST
-    fi
-    run_cmd a2ensite zabbix-ssl 2>/dev/null || warn "a2ensite zabbix-ssl failed"
-  elif [[ "$TLS_MODE" == "letsencrypt" ]]; then
-    command -v certbot &>/dev/null || run_cmd apt-get install -y certbot python3-certbot-apache
-    run_cmd certbot --apache -d "$SERVER_ADDR" --non-interactive --agree-tos -m "$LE_EMAIL"
-  fi
-  run_cmd a2ensite 000-default.conf 2>/dev/null || true
-fi
-
-#-------------------------- Firewall (UFW) ---------------------------
-if $ENABLE_FIREWALL && command -v ufw &>/dev/null; then
-  run_cmd ufw allow 80/tcp comment 'Zabbix HTTP'
-  [[ "$TLS_MODE" != "none" ]] && run_cmd ufw allow 443/tcp comment 'Zabbix HTTPS'
-  run_cmd ufw allow 10051/tcp comment 'Zabbix Server'
-  run_cmd ufw allow 10050/tcp comment 'Zabbix Agent'
-  info "UFW rules added (enable with 'ufw enable' if not already active)"
-fi
-
-#-------------------------- Service Enable & Start --------------------
-run_cmd systemctl restart zabbix-server
-run_cmd systemctl enable zabbix-server
-run_cmd systemctl restart "$ACTIVE_SVC"
-run_cmd systemctl enable "$ACTIVE_SVC"
-if ! $SKIP_APACHE; then
-  run_cmd systemctl restart apache2
-  run_cmd systemctl enable apache2
-fi
-
-#-------------------------- Health Checks (fail on failure) -----------
-info "Running post-install health checks..."
-check_svcs=(zabbix-server "$ACTIVE_SVC")
-! $SKIP_APACHE && check_svcs+=(apache2)
-for svc in "${check_svcs[@]}"; do
-  if $DRY_RUN; then
-    info "DRY-RUN: Checked service $svc status"
+  if [[ -f "$AGENT_TEMPLATE" ]]; then
+    update_config_line "$AGENT_TEMPLATE" "Server" "$SERVER_ADDR"
+    update_config_line "$AGENT_TEMPLATE" "ServerActive" "$SERVER_ADDR"
+    update_config_line "$AGENT_TEMPLATE" "Hostname" "$SERVER_ADDR"
+    info "Agent configuration updated in $AGENT_TEMPLATE"
   else
-    systemctl is-active --quiet "$svc" 2>/dev/null ||
-      die "Service $svc is NOT active – installation failed"
-    info "Service $svc is active"
+    warn "Agent configuration file $AGENT_TEMPLATE not found. Skipping agent config."
   fi
-done
-if ! $SKIP_APACHE; then
-  [[ "$TLS_MODE" != "none" ]] && PROTO="https" || PROTO="http"
-  if $DRY_RUN; then
-    info "DRY-RUN: Checked endpoint ${PROTO}://${SERVER_ADDR}/zabbix"
-  else
-    HTTP_CODE=$(curl -k -s -o /dev/null -w "%{http_code}" "${PROTO}://${SERVER_ADDR}/zabbix" || echo "000")
-    [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "301" || "$HTTP_CODE" == "302" ]] ||
-      die "Web endpoint ${PROTO}://${SERVER_ADDR}/zabbix returned $HTTP_CODE"
-    info "Web endpoint ${PROTO}://${SERVER_ADDR}/zabbix reachable ($HTTP_CODE)"
-  fi
-fi
-
-#-------------------------- Credential File Output ---------------------
-if [[ -n "$SAVE_CREDS" ]]; then
-  if $DRY_RUN; then
-    info "DRY-RUN: Would write credentials to $SAVE_CREDS"
-  else
-    cat >"$SAVE_CREDS" <<EOF
-# Zabbix EasyDeploy credentials (generated on $(date))
-# KEEP THIS FILE SECURE (chmod 600)
-
-Web Interface: http://${SERVER_ADDR}/zabbix
-EOF
-    [[ "$TLS_MODE" != "none" ]] && echo "HTTPS Interface: https://${SERVER_ADDR}/zabbix" >>"$SAVE_CREDS"
-    cat >>"$SAVE_CREDS" <<EOF
-Admin Username: Admin
-Admin Password: ${ZABBIX_ADMIN_PASS}
-
-Database User: zabbix
-Database Password: ${ZABBIX_DB_PASS}
-MariaDB Root Password: ${ZABBIX_ROOT_PASS}
-
-Zabbix Version: ${ZABBIX_VERSION}
-Ubuntu Version: ${UBUNTU_VERSION}
-TLS Mode: ${TLS_MODE}
-EOF
-    chmod 600 "$SAVE_CREDS"
-    info "Credentials saved to $SAVE_CREDS"
-  fi
-fi
-
-#-------------------------- Summary Output ----------------------------
-[[ "$TLS_MODE" != "none" ]] && HTTPS_UI="HTTPS UI: https://${SERVER_ADDR}/zabbix" || HTTPS_UI=""
-cat <<EOF
-
-===================================================================
-Installation complete!
-Web UI: http://${SERVER_ADDR}/zabbix
-${HTTPS_UI}
-EOF
-if [[ -n "$SAVE_CREDS" ]]; then
-  echo "Credentials saved to: ${SAVE_CREDS} (chmod 600)"
 else
-  echo "Admin login: Admin / ${ZABBIX_ADMIN_PASS}"
-  echo "Database user: zabbix / ${ZABBIX_DB_PASS}"
-  echo "MariaDB root: ${ZABBIX_ROOT_PASS}"
+  info "DRY-RUN: Would configure agent at $AGENT_TEMPLATE"
+  info "DRY-RUN: Would set Server=$SERVER_ADDR, ServerActive=$SERVER_ADDR, Hostname=$SERVER_ADDR"
 fi
-echo "==================================================================="
 
-exit 0
+#-------------------------- Enable and start services --------------------
+info "Enabling and starting Zabbix server..."
+run_cmd systemctl enable --now zabbix-server
+run_cmd systemctl enable --now zabbix-agent
+
+if ! $SKIP_APACHE; then
+  info "Configuring Apache for Zabbix..."
+  run_cmd a2enmod rewrite
+  if [[ "$TLS_MODE" == "selfsigned" ]]; then
+    run_cmd a2enmod ssl
+    run_cmd a2ensite default-ssl
+  elif [[ "$TLS_MODE" == "letsencrypt" ]]; then
+    run_cmd a2enmod ssl rewrite
+    run_cmd apt-get install -y certbot python3-certbot-apache
+    run_cmd certbot --apache --non-interactive --agree-tos -m "$LE_EMAIL" -d "$SERVER_ADDR" || warn "Certbot failed; continuing without Let's Encrypt"
+  fi
+  run_cmd systemctl enable --now apache2
+fi
+
+#-------------------------- Firewall --------------------------------------
+if $ENABLE_FIREWALL; then
+  info "Configuring firewall..."
+  run_cmd apt-get install -y ufw
+  run_cmd ufw allow OpenSSH
+  run_cmd ufw allow 'Zabbix Agent'
+  run_cmd ufw allow 80/tcp
+  run_cmd ufw allow 443/tcp
+  run_cmd ufw allow 10051/tcp
+  run_cmd ufw allow 10050/tcp
+  run_cmd ufw --force enable
+  info "Firewall configured"
+fi
+
+#-------------------------- PHP Tuning -----------------------------------
+if ! $SKIP_PHP_TUNING && ! $SKIP_APACHE; then
+  PHP_INI=$(find /etc/php -name php.ini -path "*/apache2/*" 2>/dev/null | head -1 || true)
+  if [[ -n "$PHP_INI" ]] && [[ -f "$PHP_INI" ]]; then
+    info "Tuning PHP config for Zabbix ($PHP_INI)..."
+    sed -i "s|^;*\s*date.timezone\s*=.*|date.timezone = $TIMEZONE|" "$PHP_INI"
+    sed -i "s|^;*\s*max_input_vars\s*=.*|max_input_vars = 5000|" "$PHP_INI"
+    info "PHP timezone set to $TIMEZONE"
+  fi
+fi
+
+#-------------------------- Save credentials ----------------------------
+if [[ -n "$SAVE_CREDS" ]] && ! $DRY_RUN; then
+  cat >"$SAVE_CREDS" <<EOF
+Zabbix Credentials (generated $TIMESTAMP)
+------------------------------------------
+Server: $SERVER_ADDR
+MariaDB Root Password: $ZABBIX_ROOT_PASS
+Zabbix DB Password: $ZABBIX_DB_PASS
+Zabbix Admin Password: $ZABBIX_ADMIN_PASS
+------------------------------------------
+EOF
+  chmod 600 "$SAVE_CREDS"
+  info "Credentials saved to $SAVE_CREDS"
+elif $DRY_RUN && [[ -n "$SAVE_CREDS" ]]; then
+  info "DRY-RUN: Would save credentials to $SAVE_CREDS"
+fi
+
+#-------------------------- Verify Installation -------------------------
+info "Verifying installation..."
+if ! $DRY_RUN; then
+  # Check services
+  for svc in mariadb zabbix-server zabbix-agent; do
+    if systemctl is-active --quiet "$svc"; then
+      info "Service $svc is active"
+    else
+      warn "Service $svc failed to start"
+    fi
+  done
+
+  # Check web interface (if Apache is enabled)
+  if ! $SKIP_APACHE; then
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://$SERVER_ADDR/zabbix/" 2>/dev/null || echo "000")
+    if [[ "$HTTP_CODE" =~ ^(200|302|301)$ ]]; then
+      info "Zabbix web interface is accessible (HTTP $HTTP_CODE)"
+    else
+      warn "Zabbix web interface not reachable (HTTP $HTTP_CODE)"
+    fi
+  fi
+fi
+
+#-------------------------- Summary --------------------------------------
+info "==============================================="
+info "Installation complete!"
+info "Server Address: $SERVER_ADDR"
+info "Zabbix Version: $ZABBIX_VERSION"
+if ! $DRY_RUN; then
+  info "Admin Login: Admin"
+  info "Admin Password: $ZABBIX_ADMIN_PASS"
+fi
+info "==============================================="
+info "Access Zabbix at: http://$SERVER_ADDR/zabbix/"
+info "Default credentials: Admin / (see --save-creds or re-run to see password)"

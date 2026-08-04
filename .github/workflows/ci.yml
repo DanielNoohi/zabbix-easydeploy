@@ -8,21 +8,94 @@ on:
     branches: [ main, master ]
 
 jobs:
-  test:
+  lint:
+    name: Lint (shellcheck + shfmt)
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Set up dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y shellcheck shfmt bats
-    
+        sudo apt-get install -y shellcheck shfmt
+
     - name: ShellCheck
       run: shellcheck zabbix-auto-install.sh
-    
+
     - name: shfmt
       run: shfmt -d -l -i 2 zabbix-auto-install.sh
-    
+
+  bats:
+    name: Bats tests
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bats
+
     - name: Bats tests
       run: bats test/
+
+  integration:
+    name: Integration (${{ matrix.ubuntu }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ubuntu: 20.04
+            image: jrei/systemd-ubuntu:20.04
+          - ubuntu: 22.04
+            image: jrei/systemd-ubuntu:22.04
+          - ubuntu: 24.04
+            image: jrei/systemd-ubuntu:24.04
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Clean install + rerun on Ubuntu ${{ matrix.ubuntu }}
+      run: |
+        container="zabbix-e2e-${{ matrix.ubuntu }}"
+        docker run --privileged --cgroupns=host -d --name "$container" \
+          -e DEBIAN_FRONTEND=noninteractive \
+          -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+          -v "${PWD}:/work" \
+          "${{ matrix.image }}" >/dev/null
+        # Wait for systemd to be ready
+        ready=0
+        for i in $(seq 1 60); do
+          if docker exec "$container" systemctl is-system-running >/dev/null 2>&1 \
+             || docker exec "$container" systemctl is-active systemd-journald >/dev/null 2>&1; then
+            ready=1; break
+          fi
+          sleep 2
+        done
+        [ "$ready" -eq 1 ] || { echo "::error::systemd not ready"; docker rm -f "$container"; exit 1; }
+        # Containers must not auto-start services during dpkg postinst
+        docker exec "$container" bash -c 'printf "#!/bin/sh\nexit 101\n" > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d'
+        # Install required tools inside the container
+        docker exec "$container" bash -c 'apt-get update -qq && apt-get install -y -qq wget gnupg2 lsb-release >/dev/null'
+        # Clean install (skip apache/firewall for speed; exercises install, schema, staff)
+        if ! out=$(docker exec "$container" bash /work/zabbix-auto-install.sh \
+          --non-interactive --ip 127.0.0.1 --zabbix-ver 7.0 \
+          --skip-apache --agent2 --no-firewall 2>&1); then
+          echo "::error::clean install FAILED on Ubuntu ${{ matrix.ubuntu }}"
+          echo "$out" | tail -40 | sed 's/^/::error::/'
+          docker rm -f "$container"
+          exit 1
+        fi
+        echo "$out" | tail -10
+        # Rerun: verify idempotency (services now active -> need --force)
+        if ! out2=$(docker exec "$container" bash /work/zabbix-auto-install.sh \
+          --non-interactive --ip 127.0.0.1 --zabbix-ver 7.0 \
+          --skip-apache --agent2 --no-firewall --force 2>&1); then
+          echo "::error::rerun FAILED on Ubuntu ${{ matrix.ubuntu }}"
+          echo "$out2" | tail -40 | sed 's/^/::error::/'
+          docker rm -f "$container"
+          exit 1
+        fi
+        echo "$out2" | tail -10
+        echo "::notice::Integration passed on Ubuntu ${{ matrix.ubuntu }} (clean install + rerun)"
+        docker rm -f "$container"

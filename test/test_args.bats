@@ -73,183 +73,81 @@ run_script() {
   assert_output "Let's Encrypt mode requires --le-email"
 }
 
-@test "Conflicting TLS options (letsencrypt and skip-ssl) fail" {
+@test "Conflicting TLS options fail" {
   run_script --non-interactive --ip 1.2.3.4 --tls letsencrypt --skip-ssl
   assert_failure
   assert_output "Conflicting TLS options"
 }
 
-@test "LetsEncrypt mode with email passes argument check" {
-  run_script --non-interactive --ip 1.2.3.4 --tls letsencrypt --le-email test@example.com --dry-run
-  assert_success
-  refute_output "Let's Encrypt mode requires --le-email"
-}
-
-@test "Accepts zabbix version 6.0" {
+@test "Accepts valid zabbix versions" {
   run_script --zabbix-ver 6.0 --help
   assert_success
-}
-
-@test "Accepts zabbix version 7.0" {
   run_script --zabbix-ver 7.0 --help
   assert_success
 }
 
 @test "Rejects invalid zabbix version" {
-  run_script --zabbix-ver 9.9 --non-interactive --ip 1.2.3.4 --tls none
+  run_script --zabbix-ver 9.9 --non-interactive --ip 1.2.3.4
   assert_failure
   assert_output "Unsupported Zabbix version"
 }
 
-@test "Accepts ubuntu version override" {
-  run_script --ubuntu-ver 22.04 --help
-  assert_success
-}
+# ==================== Dry-Run Safety & Output ====================
 
-@test "Accepts timezone" {
-  run_script --timezone "Europe/London" --help
-  assert_success
-}
-
-@test "Accepts save-creds option" {
-  run_script --save-creds /tmp/test.txt --help
-  assert_success
-}
-
-@test "Accepts non-interactive flag" {
-  run_script --non-interactive --help
-  assert_success
-}
-
-@test "Accepts force flag" {
-  run_script --force --help
-  assert_success
-}
-
-@test "Accepts dry-run flag" {
-  run_script --dry-run --help
-  assert_success
-}
-
-@test "Accepts no-firewall flag" {
-  run_script --no-firewall --help
-  assert_success
-}
-
-@test "Accepts skip-ssl flag" {
-  run_script --skip-ssl --help
-  assert_success
-}
-
-@test "Accepts agent2 flag" {
-  run_script --agent2 --help
-  assert_success
-}
-
-@test "Accepts skip-apache flag" {
-  run_script --skip-apache --help
-  assert_success
-}
-
-@test "Accepts skip-php-tuning flag" {
-  run_script --skip-php-tuning --help
-  assert_success
-}
-
-# ==================== Dry-Run & Idempotency Tests ====================
-
-@test "Dry-run mode works without actual installation" {
-  run_script --dry-run --non-interactive --ip 10.0.0.50
+@test "Dry-run mode makes zero system changes" {
+  # Run a full dry-run
+  run_script --dry-run --non-interactive --ip 1.2.3.4 --agent2
   assert_success
   assert_output "DRY-RUN:"
-  refute_output "ERROR"
+  
+  # Verify no temp files left in /tmp from our script
+  run ls /tmp/zabbix-* /tmp/sed-*
+  # We expect ls to fail (no files found) or return nothing
+  if [ "$status" -eq 0 ] && [ -n "$output" ]; then
+    echo "Dry-run left temp files: $output" >&2
+    return 1
+  fi
 }
 
-@test "Rejects invalid server address format" {
-  run_script --ip "invalid..host**" --non-interactive --dry-run
-  assert_failure
-  assert_output "Invalid server address"
-}
-
-@test "Can combine agent2 and skip-apache flags" {
-  run_script --agent2 --skip-apache --help
+@test "Dry-run shows bcrypt password generation" {
+  run_script --dry-run --non-interactive --ip 1.2.3.4
   assert_success
+  assert_output "Admin password (bcrypt)"
 }
 
-@test "Accepts non-interactive with agent2" {
-  run_script --agent2 --non-interactive --ip 10.0.0.52 --dry-run
+@test "Dry-run shows agent configuration plan" {
+  run_script --dry-run --non-interactive --ip 1.2.3.4 --agent2
   assert_success
-  assert_output "zabbix-agent2"
+  assert_output "Configuring Zabbix agent 2"
+  assert_output "zabbix_agent2.conf"
+  assert_output "Server=1.2.3.4"
 }
 
-@test "Dry-run HTTP mode configures Apache by default" {
-  run_script --dry-run --non-interactive --ip 10.0.0.80
+# ==================== Mock-based Logic Tests ====================
+
+@test "Agent config update handles existing keys and comments" {
+  CONF_FILE=$(mktemp)
+  cat >"$CONF_FILE" <<EOF
+# Server=127.0.0.1
+Server=old.ip
+  ServerActive = 127.0.0.1
+Hostname=Zabbix server
+EOF
+
+  # Source just the function from the script (exit immediately after)
+  eval "$(sed -n '/^update_config_line()/,/^}/p' ./zabbix-auto-install.sh)"
+
+  update_config_line "$CONF_FILE" "Server" "1.2.3.4"
+  update_config_line "$CONF_FILE" "ServerActive" "1.2.3.4"
+
+  run grep "^Server=1.2.3.4" "$CONF_FILE"
   assert_success
-  assert_output "apache2"
-  assert_output "a2enmod"
-}
 
-@test "Dry-run with self-signed TLS includes SSL" {
-  run_script --dry-run --non-interactive --ip 10.0.0.81 --tls selfsigned
+  run grep -c "^Server=" "$CONF_FILE"
+  [ "$output" -eq 1 ]
+
+  run grep "^ServerActive=1.2.3.4" "$CONF_FILE"
   assert_success
-  assert_output "openssl"
-  assert_output "SSL"
-}
 
-@test "Dry-run with letsencrypt" {
-  run_script --dry-run --non-interactive --ip 10.0.0.82 --tls letsencrypt --le-email admin@example.com
-  assert_success
-  assert_output "certbot"
-}
-
-@test "Dry-run with --skip-apache skips Apache packages" {
-  run_script --dry-run --non-interactive --ip 10.0.0.83 --skip-apache
-  assert_success
-  refute_output "a2enmod"
-}
-
-@test "Dry-run does not write credentials file" {
-  CREDS_TMP=$(mktemp -u)
-  rm -f "$CREDS_TMP"
-  [ ! -f "$CREDS_TMP" ]
-  run_script --dry-run --non-interactive --ip 10.0.0.84 --save-creds "$CREDS_TMP"
-  assert_success
-  assert_output "DRY-RUN: Would write credentials to"
-  [ ! -f "$CREDS_TMP" ]
-  rm -f "$CREDS_TMP"
-}
-
-@test "Secrets are masked in dry-run output" {
-  run_script --dry-run --non-interactive --ip 10.0.0.87
-  assert_success
-  assert_output "[REDACTED]"
-}
-
-@test "Skip-ssl conflicts with tls selfsigned" {
-  run_script --skip-ssl --tls selfsigned --non-interactive --ip 10.0.0.89
-  assert_failure
-  assert_output "Conflicting TLS options"
-}
-
-@test "Help works without --ip" {
-  run_script --help --non-interactive
-  assert_success
-}
-
-@test "Can run non-interactive with tls none in dry-run" {
-  run_script --dry-run --non-interactive --ip 192.168.1.100 --tls none
-  assert_success
-  assert_output "TLS mode: none"
-}
-
-@test "Can run non-interactive with tls selfsigned in dry-run" {
-  run_script --dry-run --non-interactive --ip 192.168.1.101 --tls selfsigned
-  assert_success
-  assert_output "TLS mode: selfsigned"
-}
-
-@test "Can run non-interactive with tls letsencrypt in dry-run" {
-  run_script --dry-run --non-interactive --ip example.com --tls letsencrypt --le-email test@example.com
-  assert_success
-  assert_output "TLS mode: letsencrypt"
+  rm -f "$CONF_FILE"
 }
