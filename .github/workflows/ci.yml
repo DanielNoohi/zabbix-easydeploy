@@ -78,13 +78,17 @@ jobs:
         # Install required tools inside the container
         docker exec "$container" bash -c 'apt-get update -qq && apt-get install -y -qq wget gnupg2 lsb-release >/dev/null'
         # Clean install (skip apache/firewall for speed; exercises install, schema, bcrypt)
+        ERR_MSG=""
         if ! out=$(docker exec "$container" bash /work/zabbix-auto-install.sh \
           --non-interactive --ip 127.0.0.1 --zabbix-ver 7.0 \
           --skip-apache --agent2 --no-firewall 2>&1); then
-          echo "::error::clean install FAILED on Ubuntu ${{ matrix.ubuntu }}"
-          echo "::error::$(echo "$out" | grep -E '\[ERROR\]' | tail -3)"
-          echo "$out" | tail -25 | sed 's/^/::error::/'
-          docker rm -f "$container"
+          ERR_MSG=$(echo "$out" | grep -oE '\[ERROR\].*' | tail -1)
+          echo "### FAILED: clean install on Ubuntu ${{ matrix.ubuntu }}" >>"$GITHUB_STEP_SUMMARY"
+          echo '```text' >>"$GITHUB_STEP_SUMMARY"
+          echo "$out" | tail -30 >>"$GITHUB_STEP_SUMMARY"
+          echo '```' >>"$GITHUB_STEP_SUMMARY"
+          echo "::error::$ERR_MSG"
+          docker rm -f "$container" >/dev/null
           exit 1
         fi
         echo "$out" | tail -10
@@ -92,10 +96,13 @@ jobs:
         if ! out2=$(docker exec "$container" bash /work/zabbix-auto-install.sh \
           --non-interactive --ip 127.0.0.1 --zabbix-ver 7.0 \
           --skip-apache --agent2 --no-firewall --force 2>&1); then
-          echo "::error::rerun FAILED on Ubuntu ${{ matrix.ubuntu }}"
-          echo "::error::$(echo "$out2" | grep -E '\[ERROR\]' | tail -3)"
-          echo "$out2" | tail -25 | sed 's/^/::error::/'
-          docker rm -f "$container"
+          ERR_MSG2=$(echo "$out2" | grep -oE '\[ERROR\].*' | tail -1)
+          echo "### FAILED: rerun on Ubuntu ${{ matrix.ubuntu }}" >>"$GITHUB_STEP_SUMMARY"
+          echo '```text' >>"$GITHUB_STEP_SUMMARY"
+          echo "$out2" | tail -30 >>"$GITHUB_STEP_SUMMARY"
+          echo '```' >>"$GITHUB_STEP_SUMMARY"
+          echo "::error::$ERR_MSG2"
+          docker rm -f "$container" >/dev/null
           exit 1
         fi
         echo "$out2" | tail -10
