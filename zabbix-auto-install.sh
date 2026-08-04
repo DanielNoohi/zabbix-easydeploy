@@ -13,6 +13,9 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# Never fail silently: report the failing command and line, then exit 1
+trap 'rc=$?; msg="[ERROR] command failed at line $LINENO: $BASH_COMMAND (exit $rc)"; echo "$msg" >&2; echo "$msg" >>"$LOG_FILE" 2>/dev/null || true; exit $rc' ERR
+
 LOG_FILE="/var/log/zabbix-easydeploy.log"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 
