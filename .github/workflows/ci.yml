@@ -86,9 +86,9 @@ jobs:
           echo "$out" | tail -30 >>"$GITHUB_STEP_SUMMARY"
           echo '```' >>"$GITHUB_STEP_SUMMARY"
           echo "::error::$ERR_MSG"
-          # Dump the script's own log for full detail
-          echo "::error::--- /var/log/zabbix-easydeploy.log (last 25) ---"
-          docker exec "$container" bash -c 'tail -25 /var/log/zabbix-easydeploy.log 2>/dev/null' | sed 's/^/::error::/'
+          # Dump the script's own log — last 5 lines hold the ERR trap message
+          echo "::error::--- log tail ---"
+          docker exec "$container" bash -c 'tail -5 /var/log/zabbix-easydeploy.log 2>/dev/null' | sed 's/^/::error::/'
           docker rm -f "$container" >/dev/null
           exit 1
         fi
@@ -103,8 +103,8 @@ jobs:
           echo "$out2" | tail -30 >>"$GITHUB_STEP_SUMMARY"
           echo '```' >>"$GITHUB_STEP_SUMMARY"
           echo "::error::$ERR_MSG2"
-          echo "::error::--- /var/log/zabbix-easydeploy.log (last 25) ---"
-          docker exec "$container" bash -c 'tail -25 /var/log/zabbix-easydeploy.log 2>/dev/null' | sed 's/^/::error::/'
+          echo "::error::--- log tail ---"
+          docker exec "$container" bash -c 'tail -5 /var/log/zabbix-easydeploy.log 2>/dev/null' | sed 's/^/::error::/'
           docker rm -f "$container" >/dev/null
           exit 1
         fi
