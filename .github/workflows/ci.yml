@@ -82,7 +82,7 @@ jobs:
           --non-interactive --ip 127.0.0.1 --zabbix-ver 7.0 \
           --skip-apache --agent2 --no-firewall 2>&1); then
           echo "::error::clean install FAILED on Ubuntu ${{ matrix.ubuntu }}"
-          echo "::error::$(echo "$out" | grep -E '^\[ERROR\]' | tail -3)"
+          echo "::error::$(echo "$out" | grep -E '\[ERROR\]' | tail -3)"
           echo "$out" | tail -25 | sed 's/^/::error::/'
           docker rm -f "$container"
           exit 1
@@ -93,7 +93,7 @@ jobs:
           --non-interactive --ip 127.0.0.1 --zabbix-ver 7.0 \
           --skip-apache --agent2 --no-firewall --force 2>&1); then
           echo "::error::rerun FAILED on Ubuntu ${{ matrix.ubuntu }}"
-          echo "::error::$(echo "$out2" | grep -E '^\[ERROR\]' | tail -3)"
+          echo "::error::$(echo "$out2" | grep -E '\[ERROR\]' | tail -3)"
           echo "$out2" | tail -25 | sed 's/^/::error::/'
           docker rm -f "$container"
           exit 1
