@@ -358,6 +358,10 @@ if ! $SKIP_APACHE; then
   run_cmd apt-get install -y "${apache_pkgs[@]}"
 fi
 
+# php-cli is required for bcrypt password hash generation (--skip-apache
+# excludes the Apache extensions, but we always need the CLI binary)
+run_cmd apt-get install -y php-cli
+
 #-------------------------- MariaDB configuration -----------------------
 info "Configuring MariaDB..."
 mysql_exec_secure "ALTER USER 'root'@'localhost' IDENTIFIED VIA unix_socket OR mysql_native_password USING PASSWORD('$ZABBIX_ROOT_PASS'); FLUSH PRIVILEGES;" ||
