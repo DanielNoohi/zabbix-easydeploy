@@ -333,6 +333,20 @@ info "Installing MariaDB..."
 run_cmd apt-get install -y mariadb-server mariadb-client
 run_cmd systemctl enable --now mariadb
 
+# Wait for MariaDB to be ready (socket-based check)
+if ! $DRY_RUN; then
+  attempts=0
+  until mysqladmin ping -u root --silent 2>/dev/null; do
+    attempts=$((attempts + 1))
+    if [[ $attempts -ge 30 ]]; then
+      die "MariaDB did not become ready after 60s"
+    fi
+    info "Waiting for MariaDB... (${attempts}s)"
+    sleep 2
+  done
+  info "MariaDB is ready"
+fi
+
 #-------------------------- Zabbix repository ------------------------------
 info "Installing Zabbix repository..."
 ZABBIX_REPO_PKG="zabbix-release_${ZBX_RELEASE}+ubuntu${ZBX_REPO_VER}_all.deb"
