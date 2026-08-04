@@ -73,8 +73,6 @@ jobs:
           sleep 2
         done
         [ "$ready" -eq 1 ] || { echo "::error::systemd not ready"; docker rm -f "$container"; exit 1; }
-        # Containers must not auto-start services during dpkg postinst
-        docker exec "$container" bash -c 'printf "#!/bin/sh\nexit 101\n" > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d'
         # Install required tools inside the container
         docker exec "$container" bash -c 'apt-get update -qq && apt-get install -y -qq wget gnupg2 lsb-release >/dev/null'
         # Clean install (skip apache/firewall for speed; exercises install, schema, bcrypt)
