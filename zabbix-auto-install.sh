@@ -115,7 +115,7 @@ mysql_exec() {
   if $DRY_RUN; then
     info "DRY-RUN: mysql -e '...'"
   else
-    mysql -u root -e "$1" 2>&1
+    timeout 30 mysql -u root -e "$1" 2>&1
   fi
 }
 
@@ -123,7 +123,7 @@ mysql_exec_secure() {
   if $DRY_RUN; then
     info "DRY-RUN: mysql (secure)"
   else
-    mysql -u root -e "$1" 2>&1
+    timeout 30 mysql -u root -e "$1" 2>&1
   fi
 }
 
@@ -132,7 +132,7 @@ mysql_opt_exec() {
     info "DRY-RUN: mysql (opt-file)"
   else
     [[ -f "$MYSQL_OPTFILE" ]] || die "MYSQL_OPTFILE not found"
-    mysql --defaults-extra-file="$MYSQL_OPTFILE" "$@"
+    timeout 300 mysql --defaults-extra-file="$MYSQL_OPTFILE" "$@"
   fi
 }
 
