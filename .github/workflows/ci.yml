@@ -80,14 +80,16 @@ jobs:
         if ! out=$(docker exec "$container" bash /work/zabbix-auto-install.sh \
           --non-interactive --ip 127.0.0.1 --zabbix-ver 7.0 \
           --skip-apache --agent2 --no-firewall 2>&1); then
-          ERR_MSG=$(echo "$out" | grep -oE '\[ERROR\].*' | tail -1)
-          LOG_TAIL=$(docker exec "$container" bash -c 'tail -10 /var/log/zabbix-easydeploy.log 2>/dev/null' || true)
+          LOG_TAIL=$(docker exec "$container" bash -c 'tail -20 /var/log/zabbix-easydeploy.log 2>/dev/null' || true)
+          ERR_LINE=$(echo "$out" | grep -iE 'error|fail|die' | tail -3)
           echo "### FAILED: clean install on Ubuntu ${{ matrix.ubuntu }}" >>"$GITHUB_STEP_SUMMARY"
           echo '```text' >>"$GITHUB_STEP_SUMMARY"
-          echo "$out" | tail -30 >>"$GITHUB_STEP_SUMMARY"
+          echo "$out" | tail -40 >>"$GITHUB_STEP_SUMMARY"
+          echo '---LOG---' >>"$GITHUB_STEP_SUMMARY"
+          echo "$LOG_TAIL" >>"$GITHUB_STEP_SUMMARY"
           echo '```' >>"$GITHUB_STEP_SUMMARY"
-          echo "::error::ERR: $ERR_MSG"
-          echo "::error::LOG: $LOG_TAIL"
+          echo "::error::SCRIPT OUTPUT: $ERR_LINE"
+          echo "::error::LOG TAIL: $LOG_TAIL"
           docker rm -f "$container" >/dev/null
           exit 1
         fi
@@ -96,14 +98,16 @@ jobs:
         if ! out2=$(docker exec "$container" bash /work/zabbix-auto-install.sh \
           --non-interactive --ip 127.0.0.1 --zabbix-ver 7.0 \
           --skip-apache --agent2 --no-firewall --force 2>&1); then
-          ERR_MSG2=$(echo "$out2" | grep -oE '\[ERROR\].*' | tail -1)
-          LOG_TAIL2=$(docker exec "$container" bash -c 'tail -10 /var/log/zabbix-easydeploy.log 2>/dev/null' || true)
+          LOG_TAIL2=$(docker exec "$container" bash -c 'tail -20 /var/log/zabbix-easydeploy.log 2>/dev/null' || true)
+          ERR_LINE2=$(echo "$out2" | grep -iE 'error|fail|die' | tail -3)
           echo "### FAILED: rerun on Ubuntu ${{ matrix.ubuntu }}" >>"$GITHUB_STEP_SUMMARY"
           echo '```text' >>"$GITHUB_STEP_SUMMARY"
-          echo "$out2" | tail -30 >>"$GITHUB_STEP_SUMMARY"
+          echo "$out2" | tail -40 >>"$GITHUB_STEP_SUMMARY"
+          echo '---LOG---' >>"$GITHUB_STEP_SUMMARY"
+          echo "$LOG_TAIL2" >>"$GITHUB_STEP_SUMMARY"
           echo '```' >>"$GITHUB_STEP_SUMMARY"
-          echo "::error::ERR: $ERR_MSG2"
-          echo "::error::LOG: $LOG_TAIL2"
+          echo "::error::SCRIPT OUTPUT: $ERR_LINE2"
+          echo "::error::LOG TAIL: $LOG_TAIL2"
           docker rm -f "$container" >/dev/null
           exit 1
         fi
