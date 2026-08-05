@@ -81,6 +81,37 @@ die() {
   exit 1
 }
 
+wait_for_apt() {
+  # Wait for dpkg/apt locks to be released (systemd containers hold them)
+  local lock_files="/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock"
+  for i in $(seq 1 60); do
+    local held=false
+    for lf in $lock_files; do
+      if fuser "$lf" >/dev/null 2>&1; then
+        held=true
+        break
+      fi
+    done
+    if ! $held; then
+      return 0
+    fi
+    info "Waiting for apt lock (${i}s)..."
+    sleep 2
+  done
+  warn "apt lock still held after 120s, proceeding anyway"
+  return 0
+}
+
+disable_apt_timers() {
+  # Disable unattended-upgrades/daily apt timers that hold dpkg locks
+  systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+  systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+  systemctl kill apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+  # Kill any running apt/dpkg processes
+  pkill -f "apt-get.*update" 2>/dev/null || true
+  sleep 2
+}
+
 run_cmd() {
   local cmdline
   printf -v cmdline '%q ' "$@"
@@ -90,6 +121,7 @@ run_cmd() {
   else
     info "Running: $cmdline"
     if [[ "$1" == "apt-get" ]]; then
+      wait_for_apt
       timeout 600 env \
         DEBIAN_FRONTEND=noninteractive \
         APT_LISTCHANGES_FRONTEND=none \
@@ -333,6 +365,9 @@ info "Timezone set to $TIMEZONE"
 info "TLS mode: $TLS_MODE"
 
 #-------------------------- System update ----------------------------------
+if [[ "${CI:-false}" == "true" ]]; then
+  disable_apt_timers
+fi
 info "Updating system packages..."
 run_cmd apt-get update -y
 if [[ "${CI:-false}" == "true" ]]; then
