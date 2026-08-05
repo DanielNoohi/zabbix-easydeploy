@@ -89,7 +89,14 @@ run_cmd() {
     info "DRY-RUN: $cmdline"
   else
     info "Running: $cmdline"
-    "$@"
+    if [[ "$1" == "apt-get" ]]; then
+      timeout 600 env \
+        DEBIAN_FRONTEND=noninteractive \
+        APT_LISTCHANGES_FRONTEND=none \
+        apt-get -o Dpkg::Use-Pty=0 "${@:2}"
+    else
+      "$@"
+    fi
   fi
 }
 
@@ -328,7 +335,11 @@ info "TLS mode: $TLS_MODE"
 #-------------------------- System update ----------------------------------
 info "Updating system packages..."
 run_cmd apt-get update -y
-run_cmd apt-get upgrade -y
+if [[ "${CI:-false}" == "true" ]]; then
+  warn "CI mode: skipping full system upgrade"
+else
+  run_cmd apt-get upgrade -y
+fi
 run_cmd apt-get install -y wget gnupg2 software-properties-common
 
 #-------------------------- Install MariaDB --------------------------------

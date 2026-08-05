@@ -77,7 +77,7 @@ jobs:
         docker exec "$container" bash -c 'apt-get update -qq && apt-get install -y -qq wget gnupg2 lsb-release >/dev/null'
         # Clean install (skip apache/firewall for speed; exercises install, schema, bcrypt)
         ERR_MSG=""
-        if ! out=$(docker exec "$container" bash /work/zabbix-auto-install.sh \
+        if ! out=$(docker exec -e CI=true "$container" bash /work/zabbix-auto-install.sh \
           --non-interactive --ip 127.0.0.1 --zabbix-ver 7.0 \
           --skip-apache --agent2 --no-firewall 2>&1); then
           LOG_TAIL=$(docker exec "$container" bash -c 'tail -20 /var/log/zabbix-easydeploy.log 2>/dev/null' || true)
@@ -95,7 +95,7 @@ jobs:
         fi
         echo "$out" | tail -10
         # Rerun: verify idempotency (services now active -> need --force)
-        if ! out2=$(docker exec "$container" bash /work/zabbix-auto-install.sh \
+        if ! out2=$(docker exec -e CI=true "$container" bash /work/zabbix-auto-install.sh \
           --non-interactive --ip 127.0.0.1 --zabbix-ver 7.0 \
           --skip-apache --agent2 --no-firewall --force 2>&1); then
           LOG_TAIL2=$(docker exec "$container" bash -c 'tail -20 /var/log/zabbix-easydeploy.log 2>/dev/null' || true)
