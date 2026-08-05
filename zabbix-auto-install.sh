@@ -99,15 +99,19 @@ wait_for_apt() {
 }
 
 disable_apt_timers() {
-  # Stop timers, kill services, remove all locks
+  # Mask ALL apt-related services to prevent systemd from respawning them
+  systemctl mask apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
   systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
   systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
   systemctl kill apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+  # Kill lock holders and remove lock files
   fuser -k /var/lib/dpkg/lock-frontend 2>/dev/null || true
   fuser -k /var/lib/dpkg/lock 2>/dev/null || true
   fuser -k /var/lib/apt/lists/lock 2>/dev/null || true
   fuser -k /var/cache/apt/archives/lock 2>/dev/null || true
   rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null || true
+  # Wait for dpkg to fully release
+  while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 1; done
   sleep 2
 }
 
