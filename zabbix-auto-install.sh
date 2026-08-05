@@ -378,11 +378,11 @@ if [[ "${CI:-false}" == "true" ]]; then
 else
   run_cmd apt-get upgrade -y
 fi
-run_cmd apt-get -o Dpkg::Lock::Timeout=300 install -y --no-install-recommends -y wget gnupg2 software-properties-common
+run_cmd apt-get -o Dpkg::Lock::Timeout=300 install -y --no-install-recommends -qq wget gnupg2 software-properties-common
 
 #-------------------------- Install MariaDB --------------------------------
 info "Installing MariaDB..."
-run_cmd apt-get -o Dpkg::Lock::Timeout=300 install -y --no-install-recommends -y mariadb-server mariadb-client
+run_cmd apt-get -o Dpkg::Lock::Timeout=300 install -y --no-install-recommends -qq mariadb-server mariadb-client
 run_cmd systemctl enable --now mariadb
 
 # Wait for MariaDB to be ready (socket-based check)
@@ -415,18 +415,18 @@ else
   zabbix_pkgs=(zabbix-server-mysql zabbix-frontend-php zabbix-apache-conf zabbix-sql-scripts)
   $USE_AGENT2 && zabbix_pkgs+=(zabbix-agent2) || zabbix_pkgs+=(zabbix-agent)
 fi
-run_cmd apt-get -o Dpkg::Lock::Timeout=300 install -y --no-install-recommends -y "${zabbix_pkgs[@]}"
+run_cmd apt-get -o Dpkg::Lock::Timeout=300 install -y --no-install-recommends -qq "${zabbix_pkgs[@]}"
 
 if ! $SKIP_APACHE; then
   php_exts=(php-mysql php-mbstring php-gd php-xml php-bcmath php-ldap php-curl)
-  run_cmd apt-get -o Dpkg::Lock::Timeout=300 install -y --no-install-recommends -y "${php_exts[@]}"
+  run_cmd apt-get -o Dpkg::Lock::Timeout=300 install -y --no-install-recommends -qq "${php_exts[@]}"
   apache_pkgs=(apache2 libapache2-mod-php)
-  run_cmd apt-get -o Dpkg::Lock::Timeout=300 install -y --no-install-recommends -y "${apache_pkgs[@]}"
+  run_cmd apt-get -o Dpkg::Lock::Timeout=300 install -y --no-install-recommends -qq "${apache_pkgs[@]}"
 fi
 
 # php-cli is required for bcrypt password hash generation (--skip-apache
 # excludes the Apache extensions, but we always need the CLI binary)
-run_cmd apt-get -o Dpkg::Lock::Timeout=300 install -y --no-install-recommends -y php-cli
+run_cmd apt-get -o Dpkg::Lock::Timeout=300 install -y --no-install-recommends -qq php-cli
 
 #-------------------------- MariaDB configuration -----------------------
 info "Configuring MariaDB..."
@@ -579,7 +579,7 @@ if ! $SKIP_APACHE; then
     run_cmd a2ensite default-ssl
   elif [[ "$TLS_MODE" == "letsencrypt" ]]; then
     run_cmd a2enmod ssl rewrite
-    run_cmd apt-get -o Dpkg::Lock::Timeout=300 install -y --no-install-recommends -y certbot python3-certbot-apache
+    run_cmd apt-get -o Dpkg::Lock::Timeout=300 install -y --no-install-recommends -qq certbot python3-certbot-apache
     run_cmd certbot --apache --non-interactive --agree-tos -m "$LE_EMAIL" -d "$SERVER_ADDR" || warn "Certbot failed; continuing without Let's Encrypt"
   fi
   run_cmd systemctl enable --now apache2
@@ -588,7 +588,7 @@ fi
 #-------------------------- Firewall --------------------------------------
 if $ENABLE_FIREWALL; then
   info "Configuring firewall..."
-  run_cmd apt-get -o Dpkg::Lock::Timeout=300 install -y --no-install-recommends -y ufw
+  run_cmd apt-get -o Dpkg::Lock::Timeout=300 install -y --no-install-recommends -qq ufw
   run_cmd ufw allow OpenSSH
   run_cmd ufw allow 'Zabbix Agent'
   run_cmd ufw allow 80/tcp
