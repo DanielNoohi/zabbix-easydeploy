@@ -82,33 +82,33 @@ die() {
 }
 
 wait_for_apt() {
-  # Aggressively clear apt/dpkg locks (systemd containers hold them)
-  for i in $(seq 1 30); do
-    # Kill ALL apt/dpkg processes
-    killall -9 apt apt-get dpkg 2>/dev/null || true
-    # Remove stale lock files
-    rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null || true
-    # Wait for dpkg to finish if running
+  # Kill whatever process holds the dpkg lock, then remove stale locks
+  for i in $(seq 1 20); do
+    fuser -k /var/lib/dpkg/lock-frontend 2>/dev/null || true
+    fuser -k /var/lib/dpkg/lock 2>/dev/null || true
+    fuser -k /var/lib/apt/lists/lock 2>/dev/null || true
+    fuser -k /var/cache/apt/archives/lock 2>/dev/null || true
+    sleep 1
     if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
       return 0
     fi
     info "Waiting for apt lock (${i}s)..."
-    sleep 2
   done
-  warn "apt lock still held after 60s, proceeding anyway"
+  warn "apt lock still held after 20 attempts"
   return 0
 }
 
 disable_apt_timers() {
-  # Disable ALL apt-related timers and services that hold locks
+  # Stop timers, kill services, remove all locks
   systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
   systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
   systemctl kill apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
-  # Kill any running apt/dpkg processes
-  killall -9 apt apt-get dpkg 2>/dev/null || true
-  # Remove stale lock files
+  fuser -k /var/lib/dpkg/lock-frontend 2>/dev/null || true
+  fuser -k /var/lib/dpkg/lock 2>/dev/null || true
+  fuser -k /var/lib/apt/lists/lock 2>/dev/null || true
+  fuser -k /var/cache/apt/archives/lock 2>/dev/null || true
   rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null || true
-  sleep 3
+  sleep 2
 }
 
 run_cmd() {
