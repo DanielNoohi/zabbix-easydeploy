@@ -124,11 +124,11 @@ run_cmd() {
   else
     info "Running: $cmdline"
     if [[ "$1" == "apt-get" ]]; then
-      wait_for_apt
+      # Let apt wait for the lock itself (up to 120s) instead of fighting systemd
       timeout 600 env \
         DEBIAN_FRONTEND=noninteractive \
         APT_LISTCHANGES_FRONTEND=none \
-        apt-get -o Dpkg::Use-Pty=0 "${@:2}"
+        apt-get -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=120 "${@:2}"
     else
       "$@"
     fi
