@@ -81,14 +81,13 @@ jobs:
           --non-interactive --ip 127.0.0.1 --zabbix-ver 7.0 \
           --skip-apache --agent2 --no-firewall 2>&1); then
           ERR_MSG=$(echo "$out" | grep -oE '\[ERROR\].*' | tail -1)
+          LOG_TAIL=$(docker exec "$container" bash -c 'tail -10 /var/log/zabbix-easydeploy.log 2>/dev/null' || true)
           echo "### FAILED: clean install on Ubuntu ${{ matrix.ubuntu }}" >>"$GITHUB_STEP_SUMMARY"
           echo '```text' >>"$GITHUB_STEP_SUMMARY"
           echo "$out" | tail -30 >>"$GITHUB_STEP_SUMMARY"
           echo '```' >>"$GITHUB_STEP_SUMMARY"
-          echo "::error::$ERR_MSG"
-          # Dump the script's own log — last 5 lines hold the ERR trap message
-          echo "::error::--- log tail ---"
-          docker exec "$container" bash -c 'tail -5 /var/log/zabbix-easydeploy.log 2>/dev/null' | sed 's/^/::error::/'
+          echo "::error::ERR: $ERR_MSG"
+          echo "::error::LOG: $LOG_TAIL"
           docker rm -f "$container" >/dev/null
           exit 1
         fi
@@ -98,13 +97,13 @@ jobs:
           --non-interactive --ip 127.0.0.1 --zabbix-ver 7.0 \
           --skip-apache --agent2 --no-firewall --force 2>&1); then
           ERR_MSG2=$(echo "$out2" | grep -oE '\[ERROR\].*' | tail -1)
+          LOG_TAIL2=$(docker exec "$container" bash -c 'tail -10 /var/log/zabbix-easydeploy.log 2>/dev/null' || true)
           echo "### FAILED: rerun on Ubuntu ${{ matrix.ubuntu }}" >>"$GITHUB_STEP_SUMMARY"
           echo '```text' >>"$GITHUB_STEP_SUMMARY"
           echo "$out2" | tail -30 >>"$GITHUB_STEP_SUMMARY"
           echo '```' >>"$GITHUB_STEP_SUMMARY"
-          echo "::error::$ERR_MSG2"
-          echo "::error::--- log tail ---"
-          docker exec "$container" bash -c 'tail -5 /var/log/zabbix-easydeploy.log 2>/dev/null' | sed 's/^/::error::/'
+          echo "::error::ERR: $ERR_MSG2"
+          echo "::error::LOG: $LOG_TAIL2"
           docker rm -f "$container" >/dev/null
           exit 1
         fi
