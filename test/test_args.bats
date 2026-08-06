@@ -105,6 +105,24 @@ run_script() {
   assert_output "Invalid TLS mode"
 }
 
+@test "TLS with --skip-apache fails" {
+  run_script --non-interactive --ip 1.2.3.4 --tls selfsigned --skip-apache
+  assert_failure
+  assert_output "requires Apache"
+}
+
+@test "Invalid timezone fails" {
+  run_script --dry-run --non-interactive --ip 1.2.3.4 --timezone 'bad;tz|zone'
+  assert_failure
+  assert_output "Invalid timezone"
+}
+
+@test "Valid timezone accepted" {
+  run_script --dry-run --non-interactive --ip 1.2.3.4 --timezone Europe/Berlin --skip-apache --no-firewall
+  assert_success
+  assert_output "Timezone set to Europe/Berlin"
+}
+
 @test "Accepts valid zabbix versions" {
   for ver in 6.0 7.0 7.2 7.4; do
     run_script --dry-run --non-interactive --ip 1.2.3.4 --zabbix-ver "$ver" --skip-apache --no-firewall
@@ -169,6 +187,27 @@ run_script() {
   run_script --dry-run --non-interactive --ip 1.2.3.4 --skip-apache --no-firewall
   assert_success
   assert_output "Apache skipped"
+}
+
+@test "Dry-run letsencrypt shows certbot plan without executing" {
+  run_script --dry-run --non-interactive --ip zbx.example.com --tls letsencrypt --le-email a@b.c --no-firewall
+  assert_success
+  assert_output "DRY-RUN: certbot --apache"
+  assert_output "-d zbx.example.com"
+}
+
+@test "Dry-run selfsigned plans ssl-cert install" {
+  run_script --dry-run --non-interactive --ip 1.2.3.4 --tls selfsigned --no-firewall
+  assert_success
+  assert_output "ssl-cert"
+  assert_output "a2ensite default-ssl"
+}
+
+@test "Dry-run firewall plan uses explicit SSH port, not OpenSSH profile" {
+  run_script --dry-run --non-interactive --ip 1.2.3.4 --skip-apache
+  assert_success
+  assert_output "ufw allow 22/tcp"
+  refute_output "ufw allow OpenSSH"
 }
 
 # ==================== Mock-based Logic Tests ====================

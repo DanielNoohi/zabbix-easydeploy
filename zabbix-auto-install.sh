@@ -129,8 +129,12 @@ disable_apt_timers() {
   fuser -k /var/lib/apt/lists/lock 2>/dev/null || true
   fuser -k /var/cache/apt/archives/lock 2>/dev/null || true
   rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null || true
-  # Wait for dpkg to fully release
-  while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 1; done
+  # Wait (bounded) for dpkg to fully release
+  local i
+  for i in $(seq 1 60); do
+    fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break
+    sleep 1
+  done
   sleep 2
 }
 
@@ -143,8 +147,12 @@ run_cmd() {
   else
     info "Running: $cmdline"
     if [[ "$1" == "apt-get" ]]; then
+      # AI-NOTE: 300s is only safe in CI (fail fast). Real installs legitimately
+      # exceed 5 minutes on `apt-get upgrade` / slow mirrors — allow 30 minutes.
+      local apt_timeout=1800
+      [[ "${CI:-false}" == "true" ]] && apt_timeout=300
       wait_for_apt
-      DEBIAN_FRONTEND=noninteractive timeout 300 env \
+      DEBIAN_FRONTEND=noninteractive timeout "$apt_timeout" env \
         DEBIAN_FRONTEND=noninteractive \
         APT_LISTCHANGES_FRONTEND=none \
         apt-get -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=120 "${@:2}"
@@ -215,12 +223,18 @@ run_mysql_sql() {
     info "DRY-RUN: mysql <sql-file>"
     return 0
   fi
-  local sql_file rc=0
+  local sql_file out rc=0
   sql_file=$(mktemp /tmp/zabbix-sql-XXXXXX.sql)
   chmod 600 "$sql_file"
   printf '%s\n' "$sql" >"$sql_file"
-  timeout 30 mysql -u root --batch <"$sql_file" 2>&1 || rc=$?
+  # AI-NOTE: Capture output instead of letting it hit the console raw — mysql
+  # error messages can quote query fragments (i.e. password literals). warn()
+  # masks secrets before anything is printed or logged.
+  out=$(timeout 30 mysql -u root --batch <"$sql_file" 2>&1) || rc=$?
   rm -f "$sql_file"
+  if [[ $rc -ne 0 && -n "$out" ]]; then
+    warn "mysql: $out"
+  fi
   return $rc
 }
 
@@ -239,20 +253,13 @@ mysql_query() {
   rm -f "$sql_file"
 }
 
-mysql_opt_exec() {
-  # AI-NOTE: Kept for schema-import fallback patterns; uses MYSQL_OPTFILE set by caller.
-  if $DRY_RUN; then
-    info "DRY-RUN: mysql (opt-file)"
-  else
-    [[ -f "$MYSQL_OPTFILE" ]] || die "MYSQL_OPTFILE not found"
-    timeout 300 mysql --defaults-extra-file="$MYSQL_OPTFILE" "$@"
-  fi
-}
-
 # AI-NOTE: Detect prior install so re-runs skip credential rotation and pre-flight
 # no longer dies just because zabbix-server is already active.
 detect_existing_zabbix_install() {
-  if dpkg -l zabbix-server-mysql &>/dev/null 2>&1; then
+  # AI-NOTE: BUG FIX — `dpkg -l pkg` also exits 0 for removed-but-not-purged
+  # ('rc') packages, which falsely triggered re-run mode and then died with an
+  # empty DB password. Check the real install status instead.
+  if dpkg-query -W -f='${Status}' zabbix-server-mysql 2>/dev/null | grep -q "ok installed"; then
     return 0
   fi
   if [[ -f "$ZABBIX_CONF" ]] && grep -qE '^[[:space:]]*DBPassword=' "$ZABBIX_CONF" 2>/dev/null; then
@@ -422,6 +429,11 @@ if [[ "$TLS_MODE" == "letsencrypt" ]] && [[ -z "$LE_EMAIL" ]]; then
 fi
 # --skip-ssl forces TLS none unless it conflicted with letsencrypt above
 $SKIP_SSL && TLS_MODE="none"
+# AI-NOTE: BUG FIX — --skip-apache used to silently ignore --tls; web TLS is
+# configured through Apache, so the combination is a contradiction.
+if $SKIP_APACHE && [[ "$TLS_MODE" != "none" ]]; then
+  die "--tls $TLS_MODE requires Apache (remove --skip-apache or use --tls none)"
+fi
 
 case "$ZABBIX_VERSION" in
 6.0 | 7.0 | 7.2 | 7.4)
@@ -505,6 +517,14 @@ esac
 if [[ "$TLS_MODE" == "letsencrypt" ]] && [[ -z "$LE_EMAIL" ]]; then
   die "Let's Encrypt mode requires an email address"
 fi
+if $SKIP_APACHE && [[ "$TLS_MODE" != "none" ]]; then
+  die "--tls $TLS_MODE requires Apache (remove --skip-apache or use --tls none)"
+fi
+# AI-NOTE: TIMEZONE is interpolated into a sed replacement; restrict it to the
+# characters real tz database names use so it cannot break the expression.
+if [[ ! "$TIMEZONE" =~ ^[A-Za-z0-9/_+-]+$ ]]; then
+  die "Invalid timezone: $TIMEZONE (expected a tz database name like Europe/Berlin or UTC)"
+fi
 info "Server address set to $SERVER_ADDR"
 info "Timezone set to $TIMEZONE"
 info "TLS mode: $TLS_MODE"
@@ -535,7 +555,7 @@ if ! $DRY_RUN; then
     if [[ $attempts -ge 30 ]]; then
       die "MariaDB did not become ready after 60s"
     fi
-    info "Waiting for MariaDB... (${attempts}s)"
+    info "Waiting for MariaDB... ($((attempts * 2))s)"
     sleep 2
   done
   info "MariaDB is ready"
@@ -772,14 +792,26 @@ fi
 
 if ! $SKIP_APACHE; then
   info "Configuring Apache for Zabbix..."
-  run_cmd a2enmod rewrite
+  run_cmd a2enmod rewrite headers
   if [[ "$TLS_MODE" == "selfsigned" ]]; then
+    # AI-NOTE: BUG FIX — apache2 is installed with --no-install-recommends, so
+    # ssl-cert (which generates the snakeoil cert that default-ssl references)
+    # is missing and Apache would fail to start. Install it explicitly.
+    run_cmd apt-get install -y --no-install-recommends -qq ssl-cert
     run_cmd a2enmod ssl
     run_cmd a2ensite default-ssl
   elif [[ "$TLS_MODE" == "letsencrypt" ]]; then
-    run_cmd a2enmod ssl rewrite
+    run_cmd a2enmod ssl
     run_cmd apt-get install -y --no-install-recommends -qq certbot python3-certbot-apache
-    run_cmd certbot --apache --non-interactive --agree-tos -m "$LE_EMAIL" -d "$SERVER_ADDR" || warn "Certbot failed; continuing without Let's Encrypt"
+    # AI-NOTE: BUG FIX — run_cmd exits the whole script on failure, so the old
+    # `run_cmd certbot ... || warn` fallback was dead code and a certbot failure
+    # aborted the install. Run certbot directly so we can degrade gracefully.
+    if $DRY_RUN; then
+      info "DRY-RUN: certbot --apache --non-interactive --agree-tos -m $LE_EMAIL -d $SERVER_ADDR"
+    elif ! certbot --apache --non-interactive --agree-tos -m "$LE_EMAIL" -d "$SERVER_ADDR"; then
+      warn "Certbot failed; continuing without Let's Encrypt (TLS disabled)"
+      TLS_MODE="none"
+    fi
   fi
   run_cmd systemctl enable --now apache2
 fi
@@ -788,9 +820,10 @@ fi
 if $ENABLE_FIREWALL; then
   info "Configuring firewall..."
   run_cmd apt-get install -y --no-install-recommends -qq ufw
-  run_cmd ufw allow OpenSSH
-  # AI-NOTE: BUG FIX — 'Zabbix Agent' UFW profile is not present on all Ubuntu
-  # releases; explicit ports below are the portable equivalent.
+  # AI-NOTE: BUG FIX — UFW application profiles ('OpenSSH', 'Zabbix Agent') only
+  # exist when the owning package is installed; a missing profile makes
+  # `ufw allow <profile>` fail and abort the install. Explicit ports are portable.
+  run_cmd ufw allow 22/tcp
   if ! $SKIP_APACHE; then
     run_cmd ufw allow 80/tcp
     if [[ "$TLS_MODE" != "none" ]]; then
@@ -816,7 +849,14 @@ fi
 
 #-------------------------- Save credentials ----------------------------
 if [[ -n "$SAVE_CREDS" ]] && ! $DRY_RUN; then
-  cat >"$SAVE_CREDS" <<EOF
+  # AI-NOTE: BUG FIX — on an idempotent re-run no new root/admin passwords are
+  # generated, and blindly rewriting the file replaced previously saved real
+  # credentials with "(unchanged on re-run)" placeholders. Keep the old file.
+  if [[ -z "$ZABBIX_ROOT_PASS" && -z "$ZABBIX_ADMIN_PASS" && -f "$SAVE_CREDS" ]]; then
+    info "Credentials unchanged on re-run; keeping existing $SAVE_CREDS"
+  else
+    umask 077
+    cat >"$SAVE_CREDS" <<EOF
 Zabbix Credentials (generated $TIMESTAMP)
 ------------------------------------------
 Server: $SERVER_ADDR
@@ -825,8 +865,9 @@ Zabbix DB Password: ${ZABBIX_DB_PASS:-(unknown)}
 Zabbix Admin Password: ${ZABBIX_ADMIN_PASS:-(unchanged on re-run)}
 ------------------------------------------
 EOF
-  chmod 600 "$SAVE_CREDS"
-  info "Credentials saved to $SAVE_CREDS"
+    chmod 600 "$SAVE_CREDS"
+    info "Credentials saved to $SAVE_CREDS"
+  fi
 elif $DRY_RUN && [[ -n "$SAVE_CREDS" ]]; then
   info "DRY-RUN: Would save credentials to $SAVE_CREDS"
 fi
@@ -860,6 +901,17 @@ if ! $DRY_RUN; then
     else
       warn "Zabbix web interface not reachable (HTTP $HTTP_CODE)"
       VERIFY_FAILED=true
+    fi
+
+    # When TLS is enabled, verify the HTTPS endpoint too (-k: self-signed certs)
+    if [[ "$TLS_MODE" != "none" ]]; then
+      HTTPS_CODE=$(curl -sk -o /dev/null -w "%{http_code}" "https://$SERVER_ADDR/zabbix/" 2>/dev/null || echo "000")
+      if [[ "$HTTPS_CODE" =~ ^(200|302|301)$ ]]; then
+        info "Zabbix web interface is accessible over HTTPS (HTTP $HTTPS_CODE)"
+      else
+        warn "Zabbix HTTPS endpoint not reachable (HTTP $HTTPS_CODE)"
+        VERIFY_FAILED=true
+      fi
     fi
   fi
 
