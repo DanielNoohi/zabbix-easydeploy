@@ -155,7 +155,9 @@ run_cmd() {
 }
 
 generate_password() {
-  openssl rand -base64 18 | tr -dc 'A-Za-z0-9!@#$%^&*' | head -c 24
+  # AI-NOTE: Use hex (no special chars) to avoid MySQL option-file truncation
+  # (e.g. '#' starts a comment in .cnf files) and to guarantee length.
+  openssl rand -hex 16
 }
 
 backup_file() {
@@ -586,7 +588,7 @@ else
   cat >"$MYSQL_OPTFILE" <<EOF
 [client]
 user=zabbix
-password=${ZABBIX_DB_PASS}
+password="${ZABBIX_DB_PASS}"
 EOF
   if zcat "$SCHEMA_SQL" | mysql --defaults-extra-file="$MYSQL_OPTFILE" zabbix; then
     info "Zabbix schema imported successfully"
