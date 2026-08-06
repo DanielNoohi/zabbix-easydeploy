@@ -1,41 +1,76 @@
 # Zabbix EasyDeploy
 
-A production-ready, secure, and fully automated Bash script for installing Zabbix Server on Ubuntu.
+**One command. Production-ready Zabbix Server on Ubuntu.**
+
+A hardened Bash installer that provisions Zabbix Server, MariaDB, Apache, and Agent — with secure credentials, idempotent re-runs, TLS options, and CI-backed quality checks.
+
+[![CI](https://github.com/DanielNoohi/zabbix-easydeploy/actions/workflows/ci.yml/badge.svg)](https://github.com/DanielNoohi/zabbix-easydeploy/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![ShellCheck](https://img.shields.io/badge/ShellCheck-clean-brightgreen.svg)](https://www.shellcheck.net/)
+[![Zabbix](https://img.shields.io/badge/Zabbix-6.0%20%7C%207.0%20%7C%207.2%20%7C%207.4-red.svg)](https://www.zabbix.com/)
+[![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04%20%7C%2024.04%20%7C%2026.04-E95420.svg)](https://ubuntu.com/)
 
 ---
 
-## Features
-
-*   **Interactive & Unattended Modes** – Run interactively or via CLI flags for CI/CD.
-*   **Dry‑Run Mode** – Preview actions without executing (`--dry-run`).
-*   **Idempotent & Safe** – Safe to re-run: reuses existing DB/admin passwords and credential file, skips schema import when the `zabbix` DB is already populated, backs up configs before changes.
-*   **Secure Credential Handling** – Secrets never appear in command-line arguments or logs: MySQL runs via secured option files / temp SQL files, `sed` via script files, bcrypt hash generation reads the password from stdin, all log output masked (`[REDACTED]`). The Admin password is printed **once** on the console (not written to the log). Strong random passwords (hex/alphanumeric).
-*   **TLS Options** – No TLS, self‑signed certificate, or Let's Encrypt (if `certbot` available).
-*   **Firewall** – Optional UFW configuration for HTTP/HTTPS (when Apache is used) and Zabbix ports.
-*   **Zabbix Versions** – Supports Zabbix 6.0 LTS, 7.0 LTS, 7.2, and 7.4 (default 7.0). Uses official `zabbix-release_latest_*` meta-packages. Admin password is stored as **bcrypt**; the login column is auto-detected (`alias` on 6.0, `username` on 7.0+). Note: Zabbix 6.0 and 7.2 have no packages for Ubuntu 26.04 (rejected upfront).
-*   **Agent Choice** – Install Zabbix Agent 1 or Agent 2 (`--agent2`). The unused agent unit is disabled; the selected agent listens on `127.0.0.1`.
-*   **Web Server Choice** – Skip Apache if using external web server (`--skip-apache`).
-*   **PHP Tuning** – Optional timezone and module configuration.
-*   **Post‑Install Health Check** – Verifies services and HTTP/HTTPS endpoints.
-*   **Comprehensive Logging** – Detailed logs to `/var/log/zabbix-easydeploy.log`.
-*   **Credential Output** – Optionally save generated credentials to a file (`--save-creds <file>`).
-*   **Audit‑Ready** – Includes ShellCheck, shfmt, and Bats testing configurations.
-
----
-
-## Quick Start (Interactive)
+## Quick start
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/DanielNoohi/zabbix-easydeploy/main/zabbix-auto-install.sh | tr -d '\r' > zabbix-auto-install.sh && chmod +x zabbix-auto-install.sh && sudo ./zabbix-auto-install.sh
+curl -sSL https://raw.githubusercontent.com/DanielNoohi/zabbix-easydeploy/main/zabbix-auto-install.sh \
+  | tr -d '\r' > zabbix-auto-install.sh \
+  && chmod +x zabbix-auto-install.sh \
+  && sudo ./zabbix-auto-install.sh
 ```
 
-The script will prompt for your server's IP/hostname and optional settings.
+The installer prompts for:
+
+| Prompt | Default |
+|--------|---------|
+| Server IP / hostname | *(required)* |
+| Timezone | `UTC` |
+| TLS mode (`none` / `selfsigned` / `letsencrypt`) | `none` |
+| Let's Encrypt email | only if TLS = `letsencrypt` |
+
+Everything else installs automatically. When it finishes, open:
+
+```text
+http://<your-server>/zabbix/
+```
+
+Log in as `Admin` with the password printed once at the end of the run.
+
+> **Note:** EasyDeploy brings the platform up. It monitors the local server out of the box — add remote hosts (or discovery rules) in the Zabbix UI afterward.
 
 ---
 
-## Advanced Usage (Unattended / CI/CD)
+## Why EasyDeploy
 
-### Basic Non‑Interactive
+| | |
+|---|---|
+| **Idempotent** | Safe to re-run. Reuses DB passwords, skips schema import when present, backs up configs. |
+| **Secret-safe** | Passwords never appear in argv or logs. Temp SQL / MySQL option files; bcrypt via PHP stdin; logs mask secrets as `[REDACTED]`. |
+| **TLS-ready** | Plain HTTP, self-signed, or Let's Encrypt. |
+| **Firewall-aware** | Optional UFW — opens detected SSH ports, HTTP/HTTPS, and Zabbix agent/server ports. Configured before certbot so HTTP-01 is never blocked. |
+| **Agent choice** | Agent 1 or Agent 2. Unused unit disabled; co-located agent binds to `127.0.0.1`. |
+| **CI-tested** | ShellCheck, shfmt, Bats, and containerized Ubuntu integration runs. |
+
+---
+
+## Requirements
+
+- **Ubuntu** 22.04, 24.04, or 26.04 LTS (20.04 works with a warning; 18.04 is rejected)
+- **Root** privileges (`sudo`)
+- **Internet** access for package downloads
+- For Let's Encrypt: a publicly resolvable hostname pointing at the server
+
+**Supported Zabbix versions:** 6.0 LTS · 7.0 LTS · 7.2 · 7.4 (default **7.0**)
+
+> Zabbix 6.0 and 7.2 have no packages for Ubuntu 26.04 — those combinations are rejected upfront.
+
+---
+
+## Unattended / CI usage
+
+### Minimal
 
 ```bash
 sudo ./zabbix-auto-install.sh \
@@ -45,7 +80,7 @@ sudo ./zabbix-auto-install.sh \
   --save-creds ~/zabbix-creds.txt
 ```
 
-### With Let's Encrypt TLS
+### Let's Encrypt
 
 ```bash
 sudo ./zabbix-auto-install.sh \
@@ -57,19 +92,19 @@ sudo ./zabbix-auto-install.sh \
   --save-creds ~/zabbix-creds.txt
 ```
 
-### Skip Apache & Use Existing Web Server
+### External web server + Agent 2
 
 ```bash
 sudo ./zabbix-auto-install.sh \
   --non-interactive \
   --ip 10.0.0.5 \
   --skip-apache \
-  --zabbix-ver 7.4 \
   --agent2 \
-  --save-creds ~/zabbix-creds-agent2.txt
+  --zabbix-ver 7.4 \
+  --save-creds ~/zabbix-creds.txt
 ```
 
-### Dry Run (See What Would Happen)
+### Dry run (zero system changes)
 
 ```bash
 sudo ./zabbix-auto-install.sh \
@@ -78,93 +113,80 @@ sudo ./zabbix-auto-install.sh \
   --ip 192.168.1.10
 ```
 
----
+### Common flags
 
-## Security Features
-
-*   **Strong Passwords** – 32‑character random hex passwords for:
-    *   MariaDB `root`
-    *   Zabbix database user (`zabbix`)
-    *   Zabbix web admin (`Admin`)
-*   **Secure MySQL Handling** – Uses root-owned temp SQL files and MySQL option files (never passwords on the command line or in `MYSQL_PWD`).
-*   **Least Privilege** – Database user only has privileges on the `zabbix` database.
-*   **Service Hardening** – Removes anonymous MySQL users and the `test` database.
-*   **Agent Hardening** – Co-located agent binds to `127.0.0.1`; the unused agent package is disabled.
-*   **File Backups** – Backs up modified config files with timestamps.
-*   **Least Privilege for Credentials** – If `--save-creds` is used, file is set to `chmod 600`.
-*   **No Hardcoded Secrets** – All passwords are generated at runtime.
-*   **Configurable TLS** – Optionally secure the web interface with HTTPS.
-
----
-
-## Requirements
-
-*   Ubuntu 26.04 LTS, 24.04 LTS, or 22.04 LTS (20.04 works with a warning; 18.04 is rejected)
-*   Root privileges (`sudo`)
-*   Internet access for package downloads
-*   For Let's Encrypt: a publicly resolvable domain name pointing to the server
+| Flag | Purpose |
+|------|---------|
+| `-n, --non-interactive` | No prompts (requires `--ip`) |
+| `-i, --ip ADDRESS` | Server IP or hostname |
+| `-z, --zabbix-ver VER` | `6.0` \| `7.0` \| `7.2` \| `7.4` |
+| `-l, --tls MODE` | `none` \| `selfsigned` \| `letsencrypt` |
+| `-e, --le-email EMAIL` | Required with Let's Encrypt |
+| `-s, --save-creds FILE` | Persist credentials (`chmod 600`) |
+| `-d, --dry-run` | Print the plan; change nothing |
+| `-f, --force` | Rotate passwords on re-run / skip pre-flight |
+| `--agent2` | Install Zabbix Agent 2 |
+| `--skip-apache` | Skip Apache / frontend packages |
+| `--no-firewall` | Skip UFW configuration |
+| `-h, --help` | Full option list |
 
 ---
 
-## What the Script Does
+## Security model
 
-1.   **Pre‑flight Checks** – Verifies root, checks for existing services/ports (skippable with `--force`).
-2.   **Package Installation** – Installs Apache/MariaDB/PHP (unless skipped) and required PHP extensions.
-3.   **Zabbix Repository** – Adds the official Zabbix `latest` release package for the chosen version and Ubuntu codename.
-4.   **Zabbix Components** – Installs server, frontend, agent (v1 or v2), and SQL scripts.
-5.   **Database Setup** – Creates the `zabbix` database and user (idempotent; password re-applied on reruns), imports initial schema only if the DB is not already populated.
-6.   **Credential Generation** – Creates strong random passwords for root, database, and admin user (or reuses existing ones from `zabbix_server.conf` / credentials file).
-7.   **MariaDB Hardening** – Sets root password while keeping `unix_socket` auth for `sudo mysql`, removes anonymous users, drops `test` DB.
-8.   **Zabbix Configuration** – Writes the database password into `zabbix_server.conf` via a temp `sed` script file (never in argv/logs).
-9.   **Agent Configuration** – Configures the selected agent (1 or 2) to listen on `127.0.0.1` and sets hostname; stops/disables the unselected agent.
-10.  **Web Server Setup** (if Apache not skipped):
-    *   Enables `rewrite`, `ssl`, `headers` modules.
-    *   Sets PHP timezone (default `UTC`, configurable).
-    *   Optionally creates SSL virtual host (self-signed or Let's Encrypt).
-11.  **Firewall** (if enabled) – Runs before TLS setup so certbot's HTTP-01 challenge is never blocked. Opens the detected SSH port(s) (fallback 22), 80 (and 443 if TLS), 10050 (agent), 10051 (server) via UFW. Web ports are skipped when `--skip-apache` is set.
-12.  **Service Management** – Restarts and enables Zabbix server, agent, and Apache.
-13.  **Health Check** – Verifies services are active and queries the web interface (HTTP/HTTPS).
-14.  **Output** – Displays access information (Admin password once on console) and optionally saves credentials to a file.
+- **32-character hex passwords** for MariaDB root, Zabbix DB user, and web Admin
+- **No secrets in argv** — MySQL via option/SQL temp files; bcrypt via stdin
+- **Logs never store plaintext passwords**; Admin password is shown **once** on the console
+- **Least privilege** — `zabbix` DB user scoped to the `zabbix` database only
+- **MariaDB hardening** — anonymous users removed, `test` DB dropped, `unix_socket` kept for `sudo mysql`
+- **Agent hardening** — listens on `127.0.0.1`; unused agent unit disabled
+- **Config backups** before every mutation (`*.bak.<timestamp>`)
+- **`zabbix_server.conf`** forced to `640` / group `zabbix` after writing `DBPassword`
 
 ---
 
-## Testing & Quality Assurance
+## What gets installed
 
-This project includes:
-
-*   **ShellCheck** – Static shell script analysis (`.shellcheckrc`).
-*   **shfmt** – Shell script formatter (`.shfmt`).
-*   **Bats** – Bash Automated Testing System (`test/` directory: argument-parsing + idempotency/dry-run suites).
-*   **GitHub Actions** – CI workflow that runs on every push and pull request.
-
-### Running Tests Locally
-
-Install the test dependencies:
-
-```bash
-# On Ubuntu/Debian
-sudo apt-get install -y shellcheck shfmt bats
+```text
+┌─────────────────────────────────────────────────────────┐
+│  Pre-flight → apt → MariaDB → Zabbix repo & packages    │
+│       ↓                                                 │
+│  Schema (if needed) → bcrypt Admin → server/agent conf  │
+│       ↓                                                 │
+│  UFW → Apache/TLS → enable services → health checks     │
+│       ↓                                                 │
+│  Print Admin password + optional --save-creds file      │
+└─────────────────────────────────────────────────────────┘
 ```
 
-Then run:
+1. Pre-flight (root, conflicting services — skippable with `--force`)
+2. System packages + MariaDB
+3. Official Zabbix `latest` release package for your Ubuntu / Zabbix version
+4. Server, SQL scripts, Agent (1 or 2), optional frontend + Apache
+5. Database + schema (skipped if already present)
+6. Credential generation or reuse from `zabbix_server.conf`
+7. Agent / server config, firewall, TLS, PHP timezone
+8. Service enablement + HTTP/HTTPS verification (localhost fallback for NAT)
+9. Summary with one-time Admin password
+
+Logs: `/var/log/zabbix-easydeploy.log`
+
+---
+
+## Testing
 
 ```bash
-# ShellCheck
+sudo apt-get install -y shellcheck shfmt bats
+
 shellcheck zabbix-auto-install.sh
-
-# shfmt
 shfmt -d -l -i 2 zabbix-auto-install.sh
-
-# Bats (from the repository root)
 bats test/
 ```
+
+GitHub Actions runs lint, Bats, and systemd-container integration tests on Ubuntu 22.04 / 24.04 with Zabbix 7.0 and 7.4.
 
 ---
 
 ## License
 
-Distributed under the [MIT License](LICENSE).
-
----
-
-**Made with ❤️ by [DanielNoohi](https://github.com/DanielNoohi)**
+[MIT](LICENSE) © [DanielNoohi](https://github.com/DanielNoohi)
