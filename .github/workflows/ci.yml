@@ -49,8 +49,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - ubuntu: 20.04
-            image: jrei/systemd-ubuntu:20.04
           - ubuntu: 22.04
             image: jrei/systemd-ubuntu:22.04
           - ubuntu: 24.04
