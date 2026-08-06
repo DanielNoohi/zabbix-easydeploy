@@ -647,7 +647,7 @@ elif ! $DRY_RUN; then
   SED_SCRIPT=$(mktemp)
   chmod 600 "$SED_SCRIPT"
   # Remove any existing DBPassword (commented or active)
-  printf '/^[[:space:]]*#\\\\\\?[[:space:]]*DBPassword[[:space:]]*=/d\\n' >"$SED_SCRIPT"
+  printf '/^[[:space:]]*#\\?[[:space:]]*DBPassword[[:space:]]*=/d\n' >"$SED_SCRIPT"
   run_cmd sed -i -f "$SED_SCRIPT" "$ZABBIX_CONF"
   # Append fresh entry
   echo "DBPassword=$ZABBIX_DB_PASS" >>"$ZABBIX_CONF"
