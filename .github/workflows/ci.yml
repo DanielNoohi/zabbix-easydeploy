@@ -42,7 +42,7 @@ jobs:
       run: bats test/
 
   integration:
-    name: Integration (${{ matrix.ubuntu }})
+    name: Integration (Ubuntu ${{ matrix.ubuntu }} / Zabbix ${{ matrix.zabbix }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -51,14 +51,19 @@ jobs:
         include:
           - ubuntu: 22.04
             image: jrei/systemd-ubuntu:22.04
+            zabbix: "7.0"
           - ubuntu: 24.04
             image: jrei/systemd-ubuntu:24.04
+            zabbix: "7.0"
+          - ubuntu: 24.04
+            image: jrei/systemd-ubuntu:24.04
+            zabbix: "7.4"
     steps:
     - uses: actions/checkout@v4
 
-    - name: Clean install + rerun on Ubuntu ${{ matrix.ubuntu }}
+    - name: Clean install + rerun on Ubuntu ${{ matrix.ubuntu }} (Zabbix ${{ matrix.zabbix }})
       run: |
-        container="zabbix-e2e-${{ matrix.ubuntu }}"
+        container="zabbix-e2e-${{ matrix.ubuntu }}-${{ matrix.zabbix }}"
         docker run --privileged --cgroupns=host -d --name "$container" \
           -e DEBIAN_FRONTEND=noninteractive \
           -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
@@ -81,7 +86,7 @@ jobs:
         # Clean install (skip apache/firewall for speed; exercises install, schema, bcrypt)
         ERR_MSG=""
         if ! out=$(docker exec -e CI=true -e DEBIAN_FRONTEND=noninteractive "$container" bash /work/zabbix-auto-install.sh \
-          --non-interactive --ip 127.0.0.1 --zabbix-ver 7.0 \
+          --non-interactive --ip 127.0.0.1 --zabbix-ver "${{ matrix.zabbix }}" \
           --skip-apache --agent2 --no-firewall 2>&1); then
           LOG_TAIL=$(docker exec -e DEBIAN_FRONTEND=noninteractive "$container" bash -c 'tail -20 /var/log/zabbix-easydeploy.log 2>/dev/null' || true)
           ERR_LINE=$(echo "$out" | grep -iE 'error|fail|die' | tail -3)
@@ -112,7 +117,7 @@ jobs:
         echo "::notice::Post-install assertions passed on Ubuntu ${{ matrix.ubuntu }} (zabbix-server active, MariaDB ping OK)"
         # Rerun: verify idempotency (services now active -> need --force)
         if ! out2=$(docker exec -e CI=true -e DEBIAN_FRONTEND=noninteractive "$container" bash /work/zabbix-auto-install.sh \
-          --non-interactive --ip 127.0.0.1 --zabbix-ver 7.0 \
+          --non-interactive --ip 127.0.0.1 --zabbix-ver "${{ matrix.zabbix }}" \
           --skip-apache --agent2 --no-firewall --force 2>&1); then
           LOG_TAIL2=$(docker exec -e DEBIAN_FRONTEND=noninteractive "$container" bash -c 'tail -20 /var/log/zabbix-easydeploy.log 2>/dev/null' || true)
           ERR_LINE2=$(echo "$out2" | grep -iE 'error|fail|die' | tail -3)

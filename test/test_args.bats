@@ -143,11 +143,41 @@ run_script() {
   assert_output "18.04 is no longer supported"
 }
 
+@test "Rejects Zabbix 6.0 on Ubuntu 26.04 (no packages published)" {
+  run_script --dry-run --non-interactive --ip 1.2.3.4 --zabbix-ver 6.0 --ubuntu-ver 26.04
+  assert_failure
+  assert_output "no packages for Ubuntu 26.04"
+}
+
+@test "Rejects Zabbix 7.2 on Ubuntu 26.04 (no packages published)" {
+  run_script --dry-run --non-interactive --ip 1.2.3.4 --zabbix-ver 7.2 --ubuntu-ver 26.04
+  assert_failure
+  assert_output "no packages for Ubuntu 26.04"
+}
+
+@test "Accepts Zabbix 7.4 on Ubuntu 26.04" {
+  run_script --dry-run --non-interactive --ip 1.2.3.4 --zabbix-ver 7.4 --ubuntu-ver 26.04 --skip-apache --no-firewall
+  assert_success
+}
+
 @test "Dry-run uses latest meta-package URL" {
   run_script --dry-run --non-interactive --ip 1.2.3.4 --zabbix-ver 7.4 --ubuntu-ver 24.04 --skip-apache --no-firewall
   assert_success
   assert_output "zabbix-release_latest_7.4+ubuntu24.04_all.deb"
   assert_output "/release/ubuntu/pool/main/z/zabbix-release/"
+}
+
+@test "Download goes to an unpredictable mktemp directory, not a fixed /tmp path" {
+  run_script --dry-run --non-interactive --ip 1.2.3.4 --skip-apache --no-firewall
+  assert_success
+  assert_output "zabbix-easydeploy-XXXXXX"
+  refute_output "wget -q https://repo.zabbix.com/zabbix/7.0/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_7.0+ubuntu22.04_all.deb -O /tmp/zabbix-release"
+}
+
+@test "Help does not double the ./ prefix in examples" {
+  run_script --help
+  assert_success
+  refute_output "././"
 }
 
 # ==================== Dry-Run Safety & Output ====================

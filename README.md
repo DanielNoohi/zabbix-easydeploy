@@ -12,7 +12,7 @@ A production-ready, secure, and fully automated Bash script for installing Zabbi
 *   **Secure Credential Handling** – Secrets never appear in command-line arguments or logs: MySQL runs via secured option files / temp SQL files, `sed` via script files, bcrypt hash generation reads the password from stdin, all log output masked (`[REDACTED]`). The Admin password is printed **once** on the console (not written to the log). Strong random passwords (hex/alphanumeric).
 *   **TLS Options** – No TLS, self‑signed certificate, or Let's Encrypt (if `certbot` available).
 *   **Firewall** – Optional UFW configuration for HTTP/HTTPS (when Apache is used) and Zabbix ports.
-*   **Zabbix Versions** – Supports Zabbix 6.0 LTS, 7.0 LTS, 7.2, and 7.4 (default 7.0). Uses official `zabbix-release_latest_*` meta-packages. Admin password is stored as **bcrypt**; the login column is auto-detected (`alias` on 6.0, `username` on 7.0+).
+*   **Zabbix Versions** – Supports Zabbix 6.0 LTS, 7.0 LTS, 7.2, and 7.4 (default 7.0). Uses official `zabbix-release_latest_*` meta-packages. Admin password is stored as **bcrypt**; the login column is auto-detected (`alias` on 6.0, `username` on 7.0+). Note: Zabbix 6.0 and 7.2 have no packages for Ubuntu 26.04 (rejected upfront).
 *   **Agent Choice** – Install Zabbix Agent 1 or Agent 2 (`--agent2`). The unused agent unit is disabled; the selected agent listens on `127.0.0.1`.
 *   **Web Server Choice** – Skip Apache if using external web server (`--skip-apache`).
 *   **PHP Tuning** – Optional timezone and module configuration.
@@ -121,7 +121,7 @@ sudo ./zabbix-auto-install.sh \
     *   Enables `rewrite`, `ssl`, `headers` modules.
     *   Sets PHP timezone (default `UTC`, configurable).
     *   Optionally creates SSL virtual host (self-signed or Let's Encrypt).
-11.  **Firewall** (if enabled) – Opens ports 80 (and 443 if TLS), 10050 (agent), 10051 (server) via UFW. Web ports are skipped when `--skip-apache` is set.
+11.  **Firewall** (if enabled) – Runs before TLS setup so certbot's HTTP-01 challenge is never blocked. Opens the detected SSH port(s) (fallback 22), 80 (and 443 if TLS), 10050 (agent), 10051 (server) via UFW. Web ports are skipped when `--skip-apache` is set.
 12.  **Service Management** – Restarts and enables Zabbix server, agent, and Apache.
 13.  **Health Check** – Verifies services are active and queries the web interface (HTTP/HTTPS).
 14.  **Output** – Displays access information (Admin password once on console) and optionally saves credentials to a file.

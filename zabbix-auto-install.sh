@@ -22,13 +22,16 @@
 #   8. Console shows Admin password once; log file always redacts secrets.
 # Search for "AI-NOTE:" inline comments before changing mysql, agent, or credential logic.
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
+SCRIPT_NAME="${0##*/}"
 
 set -euo pipefail
 IFS=$'\n\t'
 
-# Never fail silently: report the failing command and line, then exit 1
-trap 'rc=$?; msg="[ERROR] command failed at line $LINENO: $BASH_COMMAND (exit $rc)"; echo "$msg" >&2; echo "$msg" >>"$LOG_FILE" 2>/dev/null || true; exit $rc' ERR
+# Never fail silently: report the failing command and line, then exit 1.
+# (stderr is silenced BEFORE the append so a failed redirection cannot leak
+# a "Permission denied" message when the log file is not writable)
+trap 'rc=$?; msg="[ERROR] command failed at line $LINENO: $BASH_COMMAND (exit $rc)"; echo "$msg" >&2; { echo "$msg" >>"$LOG_FILE"; } 2>/dev/null || true; exit $rc' ERR
 
 LOG_FILE="/var/log/zabbix-easydeploy.log"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
@@ -57,6 +60,7 @@ ZABBIX_ADMIN_PASS=""
 
 MYSQL_OPTFILE=""
 SED_SCRIPT=""
+DL_DIR=""
 
 ZABBIX_CONF="/etc/zabbix/zabbix_server.conf"
 # AI-NOTE: AGENT_CONF and AGENT_SVC are set after argument parsing so --agent2
@@ -67,6 +71,7 @@ AGENT_SVC=""
 cleanup() {
   [[ -n "$MYSQL_OPTFILE" ]] && rm -f "$MYSQL_OPTFILE" || true
   [[ -n "$SED_SCRIPT" ]] && rm -f "$SED_SCRIPT" || true
+  [[ -n "$DL_DIR" && -d "$DL_DIR" ]] && rm -rf "$DL_DIR" || true
   return 0
 }
 trap cleanup EXIT
@@ -284,7 +289,7 @@ load_existing_db_password() {
 #-------------------------- Help / usage -----------------------------------
 print_help() {
   cat <<EOF
-Usage: $0 [OPTIONS]
+Usage: ${SCRIPT_NAME} [OPTIONS]
 
 Zabbix Server auto-installer for Ubuntu (script v${SCRIPT_VERSION}).
 
@@ -314,9 +319,9 @@ Security:
   - Co-located agent listens on 127.0.0.1; the unused agent package is disabled.
 
 Examples:
-  sudo ./$0 -i 192.168.1.10
-  sudo ./$0 -n -i 192.168.1.10 -z 7.0 -l none -s creds.txt
-  sudo ./$0 -d -i server.example.com --agent2 -z 7.4
+  sudo ./${SCRIPT_NAME} -i 192.168.1.10
+  sudo ./${SCRIPT_NAME} -n -i 192.168.1.10 -z 7.0 -l none -s creds.txt
+  sudo ./${SCRIPT_NAME} -d -i server.example.com --agent2 -z 7.4
 EOF
 }
 
@@ -474,6 +479,14 @@ unknown)
 *) die "Unsupported Ubuntu version: $UBUNTU_VERSION (supported: 20.04, 22.04, 24.04, 26.04)" ;;
 esac
 
+# AI-NOTE: BUG FIX — repo.zabbix.com does not publish every version for every
+# Ubuntu release; these combos previously failed later with a cryptic wget 404.
+case "${ZABBIX_VERSION}+${ZBX_REPO_VER}" in
+6.0+26.04 | 7.2+26.04)
+  die "Zabbix ${ZABBIX_VERSION} has no packages for Ubuntu ${ZBX_REPO_VER} (use Zabbix 7.0/7.4, or an older Ubuntu release)"
+  ;;
+esac
+
 #-------------------------- Root check ------------------------------------
 # Dry-run can run as any user (no changes are made)
 if ! $DRY_RUN && [[ $EUID -ne 0 ]]; then
@@ -575,9 +588,18 @@ fi
 info "Installing Zabbix repository..."
 ZABBIX_REPO_PKG="zabbix-release_latest_${ZABBIX_VERSION}+ubuntu${ZBX_REPO_VER}_all.deb"
 ZABBIX_REPO_URL="$(zabbix_release_url "$ZABBIX_VERSION" "$ZBX_REPO_VER")"
+# AI-NOTE: BUG FIX — downloading to a fixed, predictable /tmp path as root is a
+# symlink-attack vector (an unprivileged user can pre-plant a symlink and make
+# root overwrite an arbitrary file). Use an unpredictable mktemp directory.
+if $DRY_RUN; then
+  DL_DIR="/tmp/zabbix-easydeploy-XXXXXX"
+else
+  DL_DIR=$(mktemp -d /tmp/zabbix-easydeploy-XXXXXX)
+  chmod 700 "$DL_DIR"
+fi
 info "Fetching ${ZABBIX_REPO_URL}"
-run_cmd wget -q "$ZABBIX_REPO_URL" -O "/tmp/${ZABBIX_REPO_PKG}"
-run_cmd dpkg -i "/tmp/${ZABBIX_REPO_PKG}"
+run_cmd wget -q "$ZABBIX_REPO_URL" -O "${DL_DIR}/${ZABBIX_REPO_PKG}"
+run_cmd dpkg -i "${DL_DIR}/${ZABBIX_REPO_PKG}"
 run_cmd apt-get update -y
 
 # Zabbix components – when --skip-apache, exclude frontend+apache packages
@@ -730,6 +752,9 @@ elif ! $DRY_RUN; then
   # Append fresh entry
   echo "DBPassword=$ZABBIX_DB_PASS" >>"$ZABBIX_CONF"
   info "DBPassword written to $ZABBIX_CONF"
+  # Contains a secret — make sure it is never world-readable
+  chgrp zabbix "$ZABBIX_CONF" 2>/dev/null || true
+  chmod 640 "$ZABBIX_CONF" 2>/dev/null || true
   # Verify
   grep -q "^DBPassword=" "$ZABBIX_CONF" || die "DBPassword verification failed in $ZABBIX_CONF"
   rm -f "$SED_SCRIPT"
@@ -790,6 +815,36 @@ else
   systemctl disable --now zabbix-agent2 2>/dev/null || true
 fi
 
+#-------------------------- Firewall --------------------------------------
+# AI-NOTE: BUG FIX — the firewall must be configured BEFORE certbot runs: if
+# UFW was already enabled by the admin, the Let's Encrypt HTTP-01 challenge on
+# port 80 would be blocked and certbot could never succeed.
+if $ENABLE_FIREWALL; then
+  info "Configuring firewall..."
+  run_cmd apt-get install -y --no-install-recommends -qq ufw
+  # AI-NOTE: BUG FIX — UFW application profiles ('OpenSSH', 'Zabbix Agent') only
+  # exist when the owning package is installed; a missing profile makes
+  # `ufw allow <profile>` fail and abort the install. Explicit ports are portable.
+  # Detect the actual sshd listen port(s) so admins on non-standard ports are
+  # not locked out when UFW flips to default-deny; fall back to 22.
+  # `|| true`: detection is best-effort (ss may be absent; pipefail is set).
+  SSH_PORTS=$(ss -tlnpH 2>/dev/null | awk '/sshd/ {p=$4; sub(/.*:/, "", p); if (p ~ /^[0-9]+$/) print p}' | sort -un || true)
+  [[ -z "$SSH_PORTS" ]] && SSH_PORTS="22"
+  for p in $SSH_PORTS; do
+    run_cmd ufw allow "${p}/tcp"
+  done
+  if ! $SKIP_APACHE; then
+    run_cmd ufw allow 80/tcp
+    if [[ "$TLS_MODE" != "none" ]]; then
+      run_cmd ufw allow 443/tcp
+    fi
+  fi
+  run_cmd ufw allow 10051/tcp
+  run_cmd ufw allow 10050/tcp
+  run_cmd ufw --force enable
+  info "Firewall configured"
+fi
+
 if ! $SKIP_APACHE; then
   info "Configuring Apache for Zabbix..."
   run_cmd a2enmod rewrite headers
@@ -814,26 +869,6 @@ if ! $SKIP_APACHE; then
     fi
   fi
   run_cmd systemctl enable --now apache2
-fi
-
-#-------------------------- Firewall --------------------------------------
-if $ENABLE_FIREWALL; then
-  info "Configuring firewall..."
-  run_cmd apt-get install -y --no-install-recommends -qq ufw
-  # AI-NOTE: BUG FIX — UFW application profiles ('OpenSSH', 'Zabbix Agent') only
-  # exist when the owning package is installed; a missing profile makes
-  # `ufw allow <profile>` fail and abort the install. Explicit ports are portable.
-  run_cmd ufw allow 22/tcp
-  if ! $SKIP_APACHE; then
-    run_cmd ufw allow 80/tcp
-    if [[ "$TLS_MODE" != "none" ]]; then
-      run_cmd ufw allow 443/tcp
-    fi
-  fi
-  run_cmd ufw allow 10051/tcp
-  run_cmd ufw allow 10050/tcp
-  run_cmd ufw --force enable
-  info "Firewall configured"
 fi
 
 #-------------------------- PHP Tuning -----------------------------------
@@ -895,12 +930,21 @@ if ! $DRY_RUN; then
       VERIFY_FAILED=true
     fi
 
+    # AI-NOTE: BUG FIX — SERVER_ADDR is often a public IP/DNS name that is NOT
+    # reachable from the host itself (NAT, split DNS). A healthy install used to
+    # fail verification for that alone. Fall back to localhost with a Host header
+    # and only warn when the service is provably up locally.
     HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://$SERVER_ADDR/zabbix/" 2>/dev/null || echo "000")
     if [[ "$HTTP_CODE" =~ ^(200|302|301)$ ]]; then
       info "Zabbix web interface is accessible (HTTP $HTTP_CODE)"
     else
-      warn "Zabbix web interface not reachable (HTTP $HTTP_CODE)"
-      VERIFY_FAILED=true
+      LOCAL_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Host: $SERVER_ADDR" "http://127.0.0.1/zabbix/" 2>/dev/null || echo "000")
+      if [[ "$LOCAL_CODE" =~ ^(200|302|301)$ ]]; then
+        warn "Web UI is up locally (HTTP $LOCAL_CODE) but http://$SERVER_ADDR/zabbix/ is not reachable from this host (NAT/DNS?) — verify externally"
+      else
+        warn "Zabbix web interface not reachable (HTTP $HTTP_CODE via $SERVER_ADDR, HTTP $LOCAL_CODE via 127.0.0.1)"
+        VERIFY_FAILED=true
+      fi
     fi
 
     # When TLS is enabled, verify the HTTPS endpoint too (-k: self-signed certs)
@@ -909,13 +953,24 @@ if ! $DRY_RUN; then
       if [[ "$HTTPS_CODE" =~ ^(200|302|301)$ ]]; then
         info "Zabbix web interface is accessible over HTTPS (HTTP $HTTPS_CODE)"
       else
-        warn "Zabbix HTTPS endpoint not reachable (HTTP $HTTPS_CODE)"
-        VERIFY_FAILED=true
+        LOCAL_HTTPS_CODE=$(curl -sk -o /dev/null -w "%{http_code}" -H "Host: $SERVER_ADDR" "https://127.0.0.1/zabbix/" 2>/dev/null || echo "000")
+        if [[ "$LOCAL_HTTPS_CODE" =~ ^(200|302|301)$ ]]; then
+          warn "HTTPS is up locally (HTTP $LOCAL_HTTPS_CODE) but https://$SERVER_ADDR/zabbix/ is not reachable from this host (NAT/DNS?) — verify externally"
+        else
+          warn "Zabbix HTTPS endpoint not reachable (HTTP $HTTPS_CODE via $SERVER_ADDR, HTTP $LOCAL_HTTPS_CODE via 127.0.0.1)"
+          VERIFY_FAILED=true
+        fi
       fi
     fi
   fi
 
   if $VERIFY_FAILED; then
+    # AI-NOTE: BUG FIX — dying here used to happen BEFORE the summary ever showed
+    # the freshly generated Admin password, and idempotent re-runs never rotate
+    # it — the credential was lost forever. Surface it before exiting.
+    if [[ -n "$ZABBIX_ADMIN_PASS" && -z "$SAVE_CREDS" ]]; then
+      echo "Admin Password (save it now — verification failed before the summary): $ZABBIX_ADMIN_PASS"
+    fi
     die "Installation verification failed — one or more critical components are unhealthy"
   fi
 fi
