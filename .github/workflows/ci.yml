@@ -111,7 +111,6 @@ jobs:
           docker rm -f "$container" >/dev/null
           exit 1
         fi
-        fi
         echo "::notice::Post-install assertions passed on Ubuntu ${{ matrix.ubuntu }} (zabbix-server active, MariaDB ping OK, HTTP 200)"
         # Rerun: verify idempotency (services now active -> need --force)
         if ! out2=$(docker exec -e CI=true -e DEBIAN_FRONTEND=noninteractive "$container" bash /work/zabbix-auto-install.sh \
