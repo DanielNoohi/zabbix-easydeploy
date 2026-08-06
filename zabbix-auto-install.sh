@@ -117,8 +117,20 @@ disable_apt_timers() {
 
 run_cmd() {
   local cmdline
-  printf -v cmdline "%q " "$@"
+  printf -v cmdline '%q ' "$@"
   cmdline="${cmdline% }"
+  if $DRY_RUN; then
+    info "DRY-RUN: $cmdline"
+  else
+    info "Running: $cmdline"
+    if [[ "$1" == "apt-get" ]]; then
+      # Wait for dpkg to release, then run
+      timeout 600 env         DEBIAN_FRONTEND=noninteractive         APT_LISTCHANGES_FRONTEND=none         apt-get -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=300 "${@:2}"
+    else
+      "$@" || { echo "Command failed: $cmdline"; exit 1; }
+    fi
+  fi
+}"
   if $DRY_RUN; then
     info "DRY-RUN: $cmdline"
   else
