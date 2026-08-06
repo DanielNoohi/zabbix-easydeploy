@@ -115,40 +115,21 @@ disable_apt_timers() {
   sleep 2
 }
 
-#-------------------------- Helpers --------------------------------------
-wait_for_apt() {
-  for i in $(seq 1 30); do
-    killall -9 apt apt-get dpkg 2>/dev/null || true
-    rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null || true
-    if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then return 0; fi
-    sleep 2
-  done
-  return 0
-}
-
-disable_apt_timers() {
-  systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
-  systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
-  killall -9 apt apt-get dpkg 2>/dev/null || true
-  rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null || true
-}
-
 run_cmd() {
   local cmdline
-  printf -v cmdline '%q ' "$@"
+  printf -v cmdline "%q " "$@"
   cmdline="${cmdline% }"
   if $DRY_RUN; then
     info "DRY-RUN: $cmdline"
   else
     info "Running: $cmdline"
     if [[ "$1" == "apt-get" ]]; then
-      wait_for_apt
-      DEBIAN_FRONTEND=noninteractive timeout 900         apt-get -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=600 "${@:2}"
+      DEBIAN_FRONTEND=noninteractive timeout 600 apt-get -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=300 "${@:2}"
     else
-      "$@" || { echo "Command failed: $cmdline"; exit 1; }
+      "$@"
     fi
   fi
-}"
+}
   if $DRY_RUN; then
     info "DRY-RUN: $cmdline"
   else
@@ -159,24 +140,8 @@ run_cmd() {
       # Let apt handle lock waiting natively (DPkg::Lock::Timeout) with a generous outer timeout
       DEBIAN_FRONTEND=noninteractive timeout 900 \
         apt-get -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=600 "${@:2}"
-      rc=$?
-      if [ $rc -ne 0 ]; then
-        echo "=== APT FAILED (rc=$rc) ==="
-        tail -n 30 /var/log/dpkg.log 2>/dev/null || true
-        echo "=== JOURNALCTL ==="
-        journalctl -n 30 --no-pager 2>/dev/null || true
-        echo "=== DPKG STATUS ==="
-        dpkg --audit 2>/dev/null || true
-      fi
     else
-      if ! "$@"; then
-        # On failure, dump critical logs before exiting
-        echo "=== APT LOG TAIL ==="
-        tail -n 50 /var/log/dpkg.log || true
-        echo "=== SYSTEMD LOG TAIL ==="
-        journalctl -n 50 || true
-        exit 1
-      fi
+      "$@"
     fi
   fi
 }
@@ -424,11 +389,11 @@ if [[ "${CI:-false}" == "true" ]]; then
 else
   run_cmd apt-get upgrade -y
 fi
-run_cmd apt-get install -y --no-install-recommends  wget gnupg2 software-properties-common
+run_cmd apt-get install -y --no-install-recommends -qq wget gnupg2 software-properties-common
 
 #-------------------------- Install MariaDB --------------------------------
 info "Installing MariaDB..."
-run_cmd apt-get install -y --no-install-recommends  mariadb-server mariadb-client
+run_cmd apt-get install -y --no-install-recommends -qq mariadb-server mariadb-client
 run_cmd systemctl enable --now mariadb
 
 # Wait for MariaDB to be ready (socket-based check)
@@ -461,18 +426,18 @@ else
   zabbix_pkgs=(zabbix-server-mysql zabbix-frontend-php zabbix-apache-conf zabbix-sql-scripts)
   $USE_AGENT2 && zabbix_pkgs+=(zabbix-agent2) || zabbix_pkgs+=(zabbix-agent)
 fi
-run_cmd apt-get install -y --no-install-recommends  "${zabbix_pkgs[@]}"
+run_cmd apt-get install -y --no-install-recommends -qq "${zabbix_pkgs[@]}"
 
 if ! $SKIP_APACHE; then
   php_exts=(php-mysql php-mbstring php-gd php-xml php-bcmath php-ldap php-curl)
-  run_cmd apt-get install -y --no-install-recommends  "${php_exts[@]}"
+  run_cmd apt-get install -y --no-install-recommends -qq "${php_exts[@]}"
   apache_pkgs=(apache2 libapache2-mod-php)
-  run_cmd apt-get install -y --no-install-recommends  "${apache_pkgs[@]}"
+  run_cmd apt-get install -y --no-install-recommends -qq "${apache_pkgs[@]}"
 fi
 
 # php-cli is required for bcrypt password hash generation (--skip-apache
 # excludes the Apache extensions, but we always need the CLI binary)
-run_cmd apt-get install -y --no-install-recommends  php-cli
+run_cmd apt-get install -y --no-install-recommends -qq php-cli
 
 #-------------------------- MariaDB configuration -----------------------
 info "Configuring MariaDB..."
@@ -625,7 +590,7 @@ if ! $SKIP_APACHE; then
     run_cmd a2ensite default-ssl
   elif [[ "$TLS_MODE" == "letsencrypt" ]]; then
     run_cmd a2enmod ssl rewrite
-    run_cmd apt-get install -y --no-install-recommends  certbot python3-certbot-apache
+    run_cmd apt-get install -y --no-install-recommends -qq certbot python3-certbot-apache
     run_cmd certbot --apache --non-interactive --agree-tos -m "$LE_EMAIL" -d "$SERVER_ADDR" || warn "Certbot failed; continuing without Let's Encrypt"
   fi
   run_cmd systemctl enable --now apache2
@@ -634,7 +599,7 @@ fi
 #-------------------------- Firewall --------------------------------------
 if $ENABLE_FIREWALL; then
   info "Configuring firewall..."
-  run_cmd apt-get install -y --no-install-recommends  ufw
+  run_cmd apt-get install -y --no-install-recommends -qq ufw
   run_cmd ufw allow OpenSSH
   run_cmd ufw allow 'Zabbix Agent'
   run_cmd ufw allow 80/tcp
