@@ -151,3 +151,16 @@ EOF
 
   rm -f "$CONF_FILE"
 }
+
+@test "Dry-run output contains no password material" {
+  run bash -n zabbix-auto-install.sh
+  [ "$status" -eq 0 ]
+  # Run the script in dry-run mode and capture output
+  run ./zabbix-auto-install.sh --dry-run --non-interactive --ip 127.0.0.1 --zabbix-ver 7.0 --skip-apache --agent2 --no-firewall
+  # The output should NOT contain any password values
+  # (passwords are generated per-run, so we check for absence of patterns)
+  [[ ! "$output" =~ "PASSWORD(" ]]
+  [[ ! "$output" =~ "IDENTIFIED BY '" ]]
+  [[ ! "$output" =~ "Admin Password:" ]] || [[ "$output" =~ "(see --save-creds" ]]
+}
+

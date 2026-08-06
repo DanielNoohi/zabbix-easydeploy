@@ -11,6 +11,7 @@ jobs:
   lint:
     name: Lint (shellcheck + shfmt)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
     - uses: actions/checkout@v4
 
@@ -28,6 +29,7 @@ jobs:
   bats:
     name: Bats tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
     - uses: actions/checkout@v4
 
@@ -42,6 +44,7 @@ jobs:
   integration:
     name: Integration (${{ matrix.ubuntu }})
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -66,23 +69,23 @@ jobs:
         # Wait for systemd to be ready
         ready=0
         for i in $(seq 1 60); do
-          if docker exec "$container" systemctl is-system-running >/dev/null 2>&1 \
-             || docker exec "$container" systemctl is-active systemd-journald >/dev/null 2>&1; then
+          if docker exec -e DEBIAN_FRONTEND=noninteractive "$container" systemctl is-system-running >/dev/null 2>&1 \
+             || docker exec -e DEBIAN_FRONTEND=noninteractive "$container" systemctl is-active systemd-journald >/dev/null 2>&1; then
             ready=1; break
           fi
           sleep 2
         done
         [ "$ready" -eq 1 ] || { echo "::error::systemd not ready"; docker rm -f "$container"; exit 1; }
-        # Disable apt timers and kill lock holders before any apt command
-        docker exec "$container" bash -c 'systemctl mask apt-daily.service apt-daily-upgrade.service 2>/dev/null; systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null; fuser -k /var/lib/dpkg/lock-frontend 2>/dev/null; fuser -k /var/lib/dpkg/lock 2>/dev/null; fuser -k /var/lib/apt/lists/lock 2>/dev/null; rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock; sleep 2'
+        # Disable apt timers before any apt command (lock killing is handled by the script when CI=true)
+        docker exec -e DEBIAN_FRONTEND=noninteractive "$container" bash -c 'systemctl mask apt-daily.service apt-daily-upgrade.service 2>/dev/null; systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null; systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null; sleep 2'
         # Install required tools inside the container
-        docker exec "$container" bash -c 'apt-get update -qq && apt-get install -y -qq wget gnupg2 lsb-release >/dev/null'
+        docker exec -e DEBIAN_FRONTEND=noninteractive "$container" bash -c 'apt-get update -qq && apt-get install -y -qq wget gnupg2 lsb-release >/dev/null'
         # Clean install (skip apache/firewall for speed; exercises install, schema, bcrypt)
         ERR_MSG=""
-        if ! out=$(docker exec -e CI=true "$container" bash /work/zabbix-auto-install.sh \
+        if ! out=$(docker exec -e CI=true -e DEBIAN_FRONTEND=noninteractive "$container" bash /work/zabbix-auto-install.sh \
           --non-interactive --ip 127.0.0.1 --zabbix-ver 7.0 \
           --skip-apache --agent2 --no-firewall 2>&1); then
-          LOG_TAIL=$(docker exec "$container" bash -c 'tail -20 /var/log/zabbix-easydeploy.log 2>/dev/null' || true)
+          LOG_TAIL=$(docker exec -e DEBIAN_FRONTEND=noninteractive "$container" bash -c 'tail -20 /var/log/zabbix-easydeploy.log 2>/dev/null' || true)
           ERR_LINE=$(echo "$out" | grep -iE 'error|fail|die' | tail -3)
           echo "### FAILED: clean install on Ubuntu ${{ matrix.ubuntu }}" >>"$GITHUB_STEP_SUMMARY"
           echo '```text' >>"$GITHUB_STEP_SUMMARY"
@@ -96,11 +99,29 @@ jobs:
           exit 1
         fi
         echo "$out" | tail -10
+        # Post-install assertions: service active, DB reachable, HTTP endpoint up
+        if ! docker exec -e DEBIAN_FRONTEND=noninteractive "$container" systemctl is-active zabbix-server >/dev/null; then
+          echo "::error::zabbix-server not active on Ubuntu ${{ matrix.ubuntu }}"
+          docker exec -e DEBIAN_FRONTEND=noninteractive "$container" systemctl status zabbix-server --no-pager || true
+          docker rm -f "$container" >/dev/null
+          exit 1
+        fi
+        if ! docker exec -e DEBIAN_FRONTEND=noninteractive "$container" mysqladmin ping -u root --silent >/dev/null 2>&1; then
+          echo "::error::MariaDB not reachable (mysqladmin ping) on Ubuntu ${{ matrix.ubuntu }}"
+          docker rm -f "$container" >/dev/null
+          exit 1
+        fi
+        if ! docker exec -e DEBIAN_FRONTEND=noninteractive "$container" bash -c 'curl -fsS -o /dev/null http://localhost/zabbix/'; then
+          echo "::error::HTTP check failed (curl http://localhost/zabbix/) on Ubuntu ${{ matrix.ubuntu }}"
+          docker rm -f "$container" >/dev/null
+          exit 1
+        fi
+        echo "::notice::Post-install assertions passed on Ubuntu ${{ matrix.ubuntu }} (zabbix-server active, MariaDB ping OK, HTTP 200)"
         # Rerun: verify idempotency (services now active -> need --force)
-        if ! out2=$(docker exec -e CI=true "$container" bash /work/zabbix-auto-install.sh \
+        if ! out2=$(docker exec -e CI=true -e DEBIAN_FRONTEND=noninteractive "$container" bash /work/zabbix-auto-install.sh \
           --non-interactive --ip 127.0.0.1 --zabbix-ver 7.0 \
           --skip-apache --agent2 --no-firewall --force 2>&1); then
-          LOG_TAIL2=$(docker exec "$container" bash -c 'tail -20 /var/log/zabbix-easydeploy.log 2>/dev/null' || true)
+          LOG_TAIL2=$(docker exec -e DEBIAN_FRONTEND=noninteractive "$container" bash -c 'tail -20 /var/log/zabbix-easydeploy.log 2>/dev/null' || true)
           ERR_LINE2=$(echo "$out2" | grep -iE 'error|fail|die' | tail -3)
           echo "### FAILED: rerun on Ubuntu ${{ matrix.ubuntu }}" >>"$GITHUB_STEP_SUMMARY"
           echo '```text' >>"$GITHUB_STEP_SUMMARY"

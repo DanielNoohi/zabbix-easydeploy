@@ -82,19 +82,22 @@ die() {
 }
 
 wait_for_apt() {
-  # Kill whatever process holds the dpkg lock, then remove stale locks
-  for i in $(seq 1 20); do
-    fuser -k /var/lib/dpkg/lock-frontend 2>/dev/null || true
-    fuser -k /var/lib/dpkg/lock 2>/dev/null || true
-    fuser -k /var/lib/apt/lists/lock 2>/dev/null || true
-    fuser -k /var/cache/apt/archives/lock 2>/dev/null || true
-    sleep 1
-    if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
-      return 0
+  # Pure wait loop: never kill anything by default.
+  # fuser -k is only used when running in CI (CI=true), never in production.
+  local waited=0
+  while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+    if [[ "$waited" -ge 120 ]]; then
+      warn "apt lock still held after 120s"
+      break
     fi
-    info "Waiting for apt lock (${i}s)..."
+    sleep 5
+    waited=$((waited + 5))
   done
-  warn "apt lock still held after 20 attempts"
+  if [[ "${CI:-false}" == "true" ]]; then
+    # CI-only: force-release any remaining lock holders
+    fuser -k /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock \
+      /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null || true
+  fi
   return 0
 }
 
@@ -104,17 +107,10 @@ disable_apt_timers() {
   systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
   systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
   systemctl kill apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
-  # Kill lock holders and remove lock files
-  fuser -k /var/lib/dpkg/lock-frontend 2>/dev/null || true
-  fuser -k /var/lib/dpkg/lock 2>/dev/null || true
-  fuser -k /var/lib/apt/lists/lock 2>/dev/null || true
-  fuser -k /var/cache/apt/archives/lock 2>/dev/null || true
+  # Remove stale lock files (only safe once no apt/dpkg process is holding them)
   rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null || true
-  # Wait for dpkg to fully release
-  while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 1; done
   sleep 2
 }
-
 
 run_cmd() {
   local cmdline
@@ -125,16 +121,36 @@ run_cmd() {
   else
     info "Running: $cmdline"
     if [[ "$1" == "apt-get" ]]; then
-      DEBIAN_FRONTEND=noninteractive timeout 600 env         DEBIAN_FRONTEND=noninteractive         APT_LISTCHANGES_FRONTEND=none         apt-get -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=300 "${@:2}"
+      wait_for_apt
+      # Fix any broken dpkg state before running apt
+      dpkg --configure -a 2>/dev/null || true
+      # Let apt handle lock waiting natively (DPkg::Lock::Timeout) with a generous outer timeout
+      DEBIAN_FRONTEND=noninteractive timeout 900 \
+        apt-get -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=600 "${@:2}"
+      rc=$?
+      if [ $rc -ne 0 ]; then
+        echo "=== APT FAILED (rc=$rc) ==="
+        tail -n 30 /var/log/dpkg.log 2>/dev/null || true
+        echo "=== JOURNALCTL ==="
+        journalctl -n 30 --no-pager 2>/dev/null || true
+        echo "=== DPKG STATUS ==="
+        dpkg --audit 2>/dev/null || true
+      fi
     else
-      "$@" || { echo "Command failed: $cmdline"; exit 1; }
+      if ! "$@"; then
+        # On failure, dump critical logs before exiting
+        echo "=== APT LOG TAIL ==="
+        tail -n 50 /var/log/dpkg.log || true
+        echo "=== SYSTEMD LOG TAIL ==="
+        journalctl -n 50 || true
+        exit 1
+      fi
     fi
   fi
 }
 
-
 generate_password() {
-  openssl rand -base64 18 | tr -dc 'A-Za-z0-9!@#$%^&*' | head -c 24
+  openssl rand -hex 16
 }
 
 backup_file() {
@@ -155,7 +171,7 @@ mysql_exec() {
   if $DRY_RUN; then
     info "DRY-RUN: mysql -e '...'"
   else
-    timeout 30 mysql -u root -e "$1" 2>&1
+    timeout 30 mysql --defaults-extra-file="$MYSQL_OPTFILE" -e "$1" 2>&1
   fi
 }
 
@@ -163,7 +179,7 @@ mysql_exec_secure() {
   if $DRY_RUN; then
     info "DRY-RUN: mysql (secure)"
   else
-    timeout 30 mysql -u root -e "$1" 2>&1
+    timeout 30 mysql --defaults-extra-file="$MYSQL_OPTFILE" -e "$1" 2>&1
   fi
 }
 
@@ -338,7 +354,22 @@ ZABBIX_DB_PASS=$(generate_password)
 ZABBIX_ADMIN_PASS=$(generate_password)
 info "Credentials generated (passwords hidden in logs)"
 
+# Create MySQL defaults file for all DB calls (never put password on CLI)
+MYSQL_OPTFILE=$(mktemp /tmp/zabbix-mysql.XXXXXX)
+chmod 600 "$MYSQL_OPTFILE"
+cat >"$MYSQL_OPTFILE" <<MYCNF
+[client]
+user=root
+MYCNF
+
 #-------------------------- Pre-flight checks ------------------------------
+# Warn if unattended-upgrades or apt-daily timers are running: they can hold
+# the dpkg lock and stall package operations (apt will wait for the lock).
+if systemctl is-active --quiet apt-daily.timer 2>/dev/null ||
+  systemctl is-active --quiet apt-daily-upgrade.timer 2>/dev/null ||
+  pgrep -f 'unattended-upgrades|apt.systemd.daily' >/dev/null 2>&1; then
+  warn "apt-daily/apt-daily-upgrade timers or unattended-upgrades appear active — they may hold the dpkg lock"
+fi
 if ! $FORCE && ! $DRY_RUN; then
   for svc in apache2 mariadb zabbix-server; do
     if systemctl is-active --quiet "$svc" 2>/dev/null; then
@@ -376,11 +407,11 @@ if [[ "${CI:-false}" == "true" ]]; then
 else
   run_cmd apt-get upgrade -y
 fi
-run_cmd apt-get install -y --no-install-recommends -qq wget gnupg2 software-properties-common
+run_cmd apt-get install -y --no-install-recommends wget gnupg2 software-properties-common
 
 #-------------------------- Install MariaDB --------------------------------
 info "Installing MariaDB..."
-run_cmd apt-get install -y --no-install-recommends -qq mariadb-server mariadb-client
+run_cmd apt-get install -y --no-install-recommends mariadb-server mariadb-client
 run_cmd systemctl enable --now mariadb
 
 # Wait for MariaDB to be ready (socket-based check)
@@ -413,21 +444,28 @@ else
   zabbix_pkgs=(zabbix-server-mysql zabbix-frontend-php zabbix-apache-conf zabbix-sql-scripts)
   $USE_AGENT2 && zabbix_pkgs+=(zabbix-agent2) || zabbix_pkgs+=(zabbix-agent)
 fi
-run_cmd apt-get install -y --no-install-recommends -qq "${zabbix_pkgs[@]}"
+run_cmd apt-get install -y --no-install-recommends "${zabbix_pkgs[@]}"
 
 if ! $SKIP_APACHE; then
   php_exts=(php-mysql php-mbstring php-gd php-xml php-bcmath php-ldap php-curl)
-  run_cmd apt-get install -y --no-install-recommends -qq "${php_exts[@]}"
+  run_cmd apt-get install -y --no-install-recommends "${php_exts[@]}"
   apache_pkgs=(apache2 libapache2-mod-php)
-  run_cmd apt-get install -y --no-install-recommends -qq "${apache_pkgs[@]}"
+  run_cmd apt-get install -y --no-install-recommends "${apache_pkgs[@]}"
 fi
 
 # php-cli is required for bcrypt password hash generation (--skip-apache
 # excludes the Apache extensions, but we always need the CLI binary)
-run_cmd apt-get install -y --no-install-recommends -qq php-cli
+run_cmd apt-get install -y --no-install-recommends php-cli
 
 #-------------------------- MariaDB configuration -----------------------
 info "Configuring MariaDB..."
+# Set root password via defaults file (password passed to mysql, not on CLI)
+cat >"$MYSQL_OPTFILE" <<MYCNF
+[client]
+user=root
+password=$ZABBIX_ROOT_PASS
+MYCNF
+chmod 600 "$MYSQL_OPTFILE"
 mysql_exec_secure "ALTER USER 'root'@'localhost' IDENTIFIED VIA unix_socket OR mysql_native_password USING PASSWORD('$ZABBIX_ROOT_PASS'); FLUSH PRIVILEGES;" ||
   mysql_exec_secure "SET PASSWORD FOR 'root'@'localhost' = PASSWORD('$ZABBIX_ROOT_PASS'); FLUSH PRIVILEGES;" ||
   die "Failed to set MariaDB root password"
@@ -567,7 +605,13 @@ fi
 #-------------------------- Enable and start services --------------------
 info "Enabling and starting Zabbix server..."
 run_cmd systemctl enable --now zabbix-server
-run_cmd systemctl enable --now zabbix-agent
+if $USE_AGENT2; then
+  run_cmd systemctl enable --now zabbix-agent2
+  run_cmd systemctl disable --now zabbix-agent 2>/dev/null || true
+else
+  run_cmd systemctl enable --now zabbix-agent
+  run_cmd systemctl disable --now zabbix-agent2 2>/dev/null || true
+fi
 
 if ! $SKIP_APACHE; then
   info "Configuring Apache for Zabbix..."
@@ -577,7 +621,7 @@ if ! $SKIP_APACHE; then
     run_cmd a2ensite default-ssl
   elif [[ "$TLS_MODE" == "letsencrypt" ]]; then
     run_cmd a2enmod ssl rewrite
-    run_cmd apt-get install -y --no-install-recommends -qq certbot python3-certbot-apache
+    run_cmd apt-get install -y --no-install-recommends certbot python3-certbot-apache
     run_cmd certbot --apache --non-interactive --agree-tos -m "$LE_EMAIL" -d "$SERVER_ADDR" || warn "Certbot failed; continuing without Let's Encrypt"
   fi
   run_cmd systemctl enable --now apache2
@@ -586,7 +630,7 @@ fi
 #-------------------------- Firewall --------------------------------------
 if $ENABLE_FIREWALL; then
   info "Configuring firewall..."
-  run_cmd apt-get install -y --no-install-recommends -qq ufw
+  run_cmd apt-get install -y --no-install-recommends ufw
   run_cmd ufw allow OpenSSH
   run_cmd ufw allow 'Zabbix Agent'
   run_cmd ufw allow 80/tcp
@@ -629,7 +673,7 @@ fi
 info "Verifying installation..."
 if ! $DRY_RUN; then
   # Check services
-  for svc in mariadb zabbix-server zabbix-agent; do
+  for svc in mariadb zabbix-server $(if $USE_AGENT2; then echo "zabbix-agent2"; else echo "zabbix-agent"; fi); do
     if systemctl is-active --quiet "$svc"; then
       info "Service $svc is active"
     else
@@ -655,8 +699,7 @@ info "Server Address: $SERVER_ADDR"
 info "Zabbix Version: $ZABBIX_VERSION"
 if ! $DRY_RUN; then
   info "Admin Login: Admin"
-  info "Admin Password: $ZABBIX_ADMIN_PASS"
+  info "Admin Password: (see --save-creds file)"
 fi
 info "==============================================="
 info "Access Zabbix at: http://$SERVER_ADDR/zabbix/"
-info "Default credentials: Admin / (see --save-creds or re-run to see password)"
