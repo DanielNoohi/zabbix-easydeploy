@@ -379,8 +379,14 @@ fi
 $SKIP_SSL && TLS_MODE="none"
 
 case "$ZABBIX_VERSION" in
-6.0) ZBX_RELEASE="6.0-6" ;;
-7.0) ZBX_RELEASE="7.0-2" ;;
+6.0)
+  ZBX_RELEASE=$(apt-cache policy zabbix-release 2>/dev/null | grep -oP '(?<=Candidate: )6\.0-[0-9]+' | head -1 || true)
+  ZBX_RELEASE="${ZBX_RELEASE:-6.0-6}"
+  ;;
+7.0)
+  ZBX_RELEASE=$(apt-cache policy zabbix-release 2>/dev/null | grep -oP '(?<=Candidate: )7\.0-[0-9]+' | head -1 || true)
+  ZBX_RELEASE="${ZBX_RELEASE:-7.0-2}"
+  ;;
 *) die "Unsupported Zabbix version: $ZABBIX_VERSION (supported: 6.0, 7.0)" ;;
 esac
 
