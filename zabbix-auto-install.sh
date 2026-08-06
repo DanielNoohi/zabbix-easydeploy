@@ -115,10 +115,40 @@ disable_apt_timers() {
   sleep 2
 }
 
+#-------------------------- Helpers --------------------------------------
+wait_for_apt() {
+  for i in $(seq 1 30); do
+    killall -9 apt apt-get dpkg 2>/dev/null || true
+    rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null || true
+    if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then return 0; fi
+    sleep 2
+  done
+  return 0
+}
+
+disable_apt_timers() {
+  systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+  systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+  killall -9 apt apt-get dpkg 2>/dev/null || true
+  rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null || true
+}
+
 run_cmd() {
   local cmdline
   printf -v cmdline '%q ' "$@"
   cmdline="${cmdline% }"
+  if $DRY_RUN; then
+    info "DRY-RUN: $cmdline"
+  else
+    info "Running: $cmdline"
+    if [[ "$1" == "apt-get" ]]; then
+      wait_for_apt
+      DEBIAN_FRONTEND=noninteractive timeout 900         apt-get -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=600 "${@:2}"
+    else
+      "$@" || { echo "Command failed: $cmdline"; exit 1; }
+    fi
+  fi
+}"
   if $DRY_RUN; then
     info "DRY-RUN: $cmdline"
   else
@@ -129,8 +159,24 @@ run_cmd() {
       # Let apt handle lock waiting natively (DPkg::Lock::Timeout) with a generous outer timeout
       DEBIAN_FRONTEND=noninteractive timeout 900 \
         apt-get -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=600 "${@:2}"
+      rc=$?
+      if [ $rc -ne 0 ]; then
+        echo "=== APT FAILED (rc=$rc) ==="
+        tail -n 30 /var/log/dpkg.log 2>/dev/null || true
+        echo "=== JOURNALCTL ==="
+        journalctl -n 30 --no-pager 2>/dev/null || true
+        echo "=== DPKG STATUS ==="
+        dpkg --audit 2>/dev/null || true
+      fi
     else
-      "$@"
+      if ! "$@"; then
+        # On failure, dump critical logs before exiting
+        echo "=== APT LOG TAIL ==="
+        tail -n 50 /var/log/dpkg.log || true
+        echo "=== SYSTEMD LOG TAIL ==="
+        journalctl -n 50 || true
+        exit 1
+      fi
     fi
   fi
 }
