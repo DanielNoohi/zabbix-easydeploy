@@ -381,13 +381,17 @@ fi
 $SKIP_SSL && TLS_MODE="none"
 
 case "$ZABBIX_VERSION" in
-6.0)
-  ZBX_RELEASE=$(apt-cache policy zabbix-release 2>/dev/null | grep -oP '(?<=Candidate: )6\.0-[0-9]+' | head -1 || true)
-  ZBX_RELEASE="${ZBX_RELEASE:-6.0-6}"
-  ;;
-7.0)
-  ZBX_RELEASE=$(apt-cache policy zabbix-release 2>/dev/null | grep -oP '(?<=Candidate: )7\.0-[0-9]+' | head -1 || true)
-  ZBX_RELEASE="${ZBX_RELEASE:-7.0-2}"
+6.0 | 7.0)
+  # AI-NOTE: Query Zabbix repo listing for latest release package version.
+  # Falls back to hardcoded defaults if curl fails.
+  ZBX_RELEASE=$(curl -fsSL "https://repo.zabbix.com/zabbix/${ZABBIX_VERSION}/ubuntu/pool/main/z/zabbix-release/" 2>/dev/null | grep -oP "zabbix-release_\K${ZABBIX_VERSION}-[0-9]+(?=\+ubuntu)" | sort -V | tail -1 || true)
+  if [[ -z "$ZBX_RELEASE" ]]; then
+    warn "Could not detect latest Zabbix release version; using fallback defaults"
+    case "$ZABBIX_VERSION" in
+    6.0) ZBX_RELEASE="6.0-6" ;;
+    7.0) ZBX_RELEASE="7.0-2" ;;
+    esac
+  fi
   ;;
 *) die "Unsupported Zabbix version: $ZABBIX_VERSION (supported: 6.0, 7.0)" ;;
 esac
