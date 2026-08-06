@@ -5,10 +5,11 @@
 #   • Dry‑run mode (zero system changes – no files created)
 #   • Idempotent – safe to re‑run, reuses existing credentials & schema
 #   • Secure credential handling (MYSQL opt‑file, stdin-based php hash, masked logs)
-#   • Bcrypt admin password for all supported versions (6.0 and 7.0+)
+#   • Bcrypt admin password for all supported versions (6.0–7.4)
 #   • Apache PHP ini tuned (not CLI php.ini)
 #   • Rejects unsupported Ubuntu versions; fails on critical DB ops
 #   • Verified schema import, service status, and HTTP endpoint before success
+#   • Uses official zabbix-release_latest_* meta-packages (no fragile version scrape)
 #
 # AI-MAINTAINER-NOTES (bug fixes applied):
 #   1. Agent2: use zabbix-agent2 systemd unit when --agent2 is set (was always zabbix-agent).
@@ -17,8 +18,11 @@
 #   4. Pre-flight: active services allowed on detected re-runs (no longer require --force).
 #   5. Verification: critical service/HTTP failures now exit non-zero (was warn-only).
 #   6. UFW: removed non-portable 'Zabbix Agent' profile; explicit port rules only.
-#   7. Apt locks: wait_for_apt() is invoked before every apt-get via run_cmd().
+#   7. Apt locks: wait_for_apt() waits (no fuser -k); CI uses disable_apt_timers().
+#   8. Console shows Admin password once; log file always redacts secrets.
 # Search for "AI-NOTE:" inline comments before changing mysql, agent, or credential logic.
+
+SCRIPT_VERSION="1.1.0"
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -96,21 +100,20 @@ die() {
 }
 
 wait_for_apt() {
-  # AI-NOTE: This helper was previously defined but never invoked, causing apt
-  # lock failures on fresh VMs/cloud images where unattended-upgrades holds dpkg.
-  # We call it before every apt-get batch (see run_cmd + system update section).
-  for i in $(seq 1 20); do
-    fuser -k /var/lib/dpkg/lock-frontend 2>/dev/null || true
-    fuser -k /var/lib/dpkg/lock 2>/dev/null || true
-    fuser -k /var/lib/apt/lists/lock 2>/dev/null || true
-    fuser -k /var/cache/apt/archives/lock 2>/dev/null || true
-    sleep 1
-    if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+  # AI-NOTE: Wait politely for apt/dpkg locks. Never kill lock holders here —
+  # fuser -k mid-dpkg corrupts the package database. Aggressive lock clearing
+  # stays confined to disable_apt_timers() which only runs when CI=true.
+  local i
+  for i in $(seq 1 60); do
+    if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 &&
+      ! fuser /var/lib/dpkg/lock >/dev/null 2>&1 &&
+      ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
       return 0
     fi
-    info "Waiting for apt lock (${i}s)..."
+    info "Waiting for apt lock (${i}/60)..."
+    sleep 2
   done
-  warn "apt lock still held after 20 attempts"
+  warn "apt lock still held after waiting ~2 minutes"
   return 0
 }
 
@@ -172,6 +175,28 @@ backup_file() {
 validate_server_addr() {
   local addr="$1"
   [[ -n "$addr" ]] || die "Server address cannot be empty"
+}
+
+# Require a non-empty option value that is not another flag.
+need_value() {
+  local opt="$1" val="${2:-}"
+  if [[ -z "$val" || "$val" == -* ]]; then
+    die "Option $opt requires a value"
+  fi
+}
+
+# Official latest meta-package URL (layout changed at 7.2+).
+zabbix_release_url() {
+  local ver="$1" ubuntu_ver="$2"
+  local pkg="zabbix-release_latest_${ver}+ubuntu${ubuntu_ver}_all.deb"
+  case "$ver" in
+  6.0 | 7.0)
+    printf '%s\n' "https://repo.zabbix.com/zabbix/${ver}/ubuntu/pool/main/z/zabbix-release/${pkg}"
+    ;;
+  *)
+    printf '%s\n' "https://repo.zabbix.com/zabbix/${ver}/release/ubuntu/pool/main/z/zabbix-release/${pkg}"
+    ;;
+  esac
 }
 
 # AI-NOTE: Escape single quotes for MariaDB string literals.
@@ -254,11 +279,11 @@ print_help() {
   cat <<EOF
 Usage: $0 [OPTIONS]
 
-Zabbix Server auto-installer for Ubuntu.
+Zabbix Server auto-installer for Ubuntu (script v${SCRIPT_VERSION}).
 
 Options:
   -i, --ip ADDRESS          Server IP or hostname (required unless interactive)
-  -z, --zabbix-ver VER      Zabbix version: 6.0 or 7.0 (default: 7.0)
+  -z, --zabbix-ver VER      Zabbix version: 6.0, 7.0, 7.2, or 7.4 (default: 7.0)
   -u, --ubuntu-ver VER      Ubuntu version override (default: detected)
   -t, --timezone TZ         Timezone (default: UTC)
   -l, --tls MODE            TLS mode: none, selfsigned, letsencrypt (default: none)
@@ -272,16 +297,19 @@ Options:
       --agent2              Install Zabbix Agent 2 instead of Agent 1
       --skip-apache         Skip Apache installation and web configuration
       --skip-php-tuning     Skip PHP timezone tuning
+  -v, --version             Print script version and exit
+  -h, --help                Show this help
 
 Security:
-  - Admin password is stored as bcrypt on all supported versions (6.0, 7.0+).
+  - Admin password is stored as bcrypt on all supported versions (6.0–7.4).
   - Generated passwords are passed via secured files / stdin, never as argv.
-  - Logs mask password values.
+  - Logs mask password values; the Admin password is printed once on the console.
+  - Co-located agent listens on 127.0.0.1; the unused agent package is disabled.
 
 Examples:
   sudo ./$0 -i 192.168.1.10
   sudo ./$0 -n -i 192.168.1.10 -z 7.0 -l none -s creds.txt
-  sudo ./$0 -d -i server.example.com --agent2
+  sudo ./$0 -d -i server.example.com --agent2 -z 7.4
 EOF
 }
 
@@ -292,32 +320,43 @@ while [[ $# -gt 0 ]]; do
     print_help
     exit 0
     ;;
+  -v | --version)
+    echo "zabbix-auto-install.sh ${SCRIPT_VERSION}"
+    exit 0
+    ;;
   -i | --ip)
-    SERVER_ADDR="${2:-}"
+    need_value "$1" "${2:-}"
+    SERVER_ADDR="$2"
     shift 2
     ;;
   -z | --zabbix-ver)
-    ZABBIX_VERSION="${2:-}"
+    need_value "$1" "${2:-}"
+    ZABBIX_VERSION="$2"
     shift 2
     ;;
   -u | --ubuntu-ver)
-    UBUNTU_VERSION="${2:-}"
+    need_value "$1" "${2:-}"
+    UBUNTU_VERSION="$2"
     shift 2
     ;;
   -t | --timezone)
-    TIMEZONE="${2:-}"
+    need_value "$1" "${2:-}"
+    TIMEZONE="$2"
     shift 2
     ;;
   -l | --tls)
-    TLS_MODE="${2:-}"
+    need_value "$1" "${2:-}"
+    TLS_MODE="$2"
     shift 2
     ;;
   -e | --le-email)
-    LE_EMAIL="${2:-}"
+    need_value "$1" "${2:-}"
+    LE_EMAIL="$2"
     shift 2
     ;;
   -s | --save-creds)
-    SAVE_CREDS="${2:-}"
+    need_value "$1" "${2:-}"
+    SAVE_CREDS="$2"
     shift 2
     ;;
   -n | --non-interactive)
@@ -371,6 +410,10 @@ fi
 if $NON_INTERACTIVE && [[ -z "$SERVER_ADDR" ]]; then
   die "Non-interactive mode requires --ip"
 fi
+case "$TLS_MODE" in
+none | selfsigned | letsencrypt) ;;
+*) die "Invalid TLS mode: $TLS_MODE (use none, selfsigned, or letsencrypt)" ;;
+esac
 if [[ "$TLS_MODE" == "letsencrypt" ]] && $SKIP_SSL; then
   die "Conflicting TLS options: --tls letsencrypt and --skip-ssl"
 fi
@@ -381,19 +424,12 @@ fi
 $SKIP_SSL && TLS_MODE="none"
 
 case "$ZABBIX_VERSION" in
-6.0 | 7.0)
-  # AI-NOTE: Query Zabbix repo listing for latest release package version.
-  # Falls back to hardcoded defaults if curl fails.
-  ZBX_RELEASE=$(curl -fsSL "https://repo.zabbix.com/zabbix/${ZABBIX_VERSION}/ubuntu/pool/main/z/zabbix-release/" 2>/dev/null | grep -oP "zabbix-release_\K${ZABBIX_VERSION}-[0-9]+(?=\+ubuntu)" | sort -V | tail -1 || true)
-  if [[ -z "$ZBX_RELEASE" ]]; then
-    warn "Could not detect latest Zabbix release version; using fallback defaults"
-    case "$ZABBIX_VERSION" in
-    6.0) ZBX_RELEASE="6.0-6" ;;
-    7.0) ZBX_RELEASE="7.0-2" ;;
-    esac
-  fi
+6.0 | 7.0 | 7.2 | 7.4)
+  # AI-NOTE: Use official latest meta-packages instead of scraping HTML for
+  # zabbix-release_N.N-M versions (brittle and diverged for 7.2+ repo layout).
+  info "Zabbix version ${ZABBIX_VERSION} (release package: latest meta)"
   ;;
-*) die "Unsupported Zabbix version: $ZABBIX_VERSION (supported: 6.0, 7.0)" ;;
+*) die "Unsupported Zabbix version: $ZABBIX_VERSION (supported: 6.0, 7.0, 7.2, 7.4)" ;;
 esac
 
 #-------------------------- Detect Ubuntu version ---------------------
@@ -405,7 +441,16 @@ else
 fi
 
 case "$UBUNTU_VERSION" in
-24.04 | 22.04 | 20.04 | 18.04) ZBX_REPO_VER="$UBUNTU_VERSION" ;;
+26.04 | 24.04 | 22.04)
+  ZBX_REPO_VER="$UBUNTU_VERSION"
+  ;;
+20.04)
+  ZBX_REPO_VER="$UBUNTU_VERSION"
+  warn "Ubuntu 20.04 is EOL; prefer 22.04, 24.04, or 26.04"
+  ;;
+18.04)
+  die "Ubuntu 18.04 is no longer supported. Use Ubuntu 22.04, 24.04, or 26.04."
+  ;;
 unknown)
   if $DRY_RUN; then
     ZBX_REPO_VER="22.04"
@@ -414,7 +459,7 @@ unknown)
     die "Could not detect Ubuntu version. Use --ubuntu-ver to specify."
   fi
   ;;
-*) die "Unsupported Ubuntu version: $UBUNTU_VERSION (supported: 18.04, 20.04, 22.04, 24.04)" ;;
+*) die "Unsupported Ubuntu version: $UBUNTU_VERSION (supported: 20.04, 22.04, 24.04, 26.04)" ;;
 esac
 
 #-------------------------- Root check ------------------------------------
@@ -453,6 +498,13 @@ if ! $NON_INTERACTIVE; then
 fi
 
 validate_server_addr "$SERVER_ADDR"
+case "$TLS_MODE" in
+none | selfsigned | letsencrypt) ;;
+*) die "Invalid TLS mode: $TLS_MODE (use none, selfsigned, or letsencrypt)" ;;
+esac
+if [[ "$TLS_MODE" == "letsencrypt" ]] && [[ -z "$LE_EMAIL" ]]; then
+  die "Let's Encrypt mode requires an email address"
+fi
 info "Server address set to $SERVER_ADDR"
 info "Timezone set to $TIMEZONE"
 info "TLS mode: $TLS_MODE"
@@ -501,8 +553,10 @@ fi
 
 #-------------------------- Zabbix repository ------------------------------
 info "Installing Zabbix repository..."
-ZABBIX_REPO_PKG="zabbix-release_${ZBX_RELEASE}+ubuntu${ZBX_REPO_VER}_all.deb"
-run_cmd wget -q "https://repo.zabbix.com/zabbix/${ZABBIX_VERSION}/ubuntu/pool/main/z/zabbix-release/${ZABBIX_REPO_PKG}" -O "/tmp/${ZABBIX_REPO_PKG}"
+ZABBIX_REPO_PKG="zabbix-release_latest_${ZABBIX_VERSION}+ubuntu${ZBX_REPO_VER}_all.deb"
+ZABBIX_REPO_URL="$(zabbix_release_url "$ZABBIX_VERSION" "$ZBX_REPO_VER")"
+info "Fetching ${ZABBIX_REPO_URL}"
+run_cmd wget -q "$ZABBIX_REPO_URL" -O "/tmp/${ZABBIX_REPO_PKG}"
 run_cmd dpkg -i "/tmp/${ZABBIX_REPO_PKG}"
 run_cmd apt-get update -y
 
@@ -686,13 +740,15 @@ if ! $DRY_RUN; then
     update_config_line "$AGENT_CONF" "Server" "$SERVER_ADDR"
     update_config_line "$AGENT_CONF" "ServerActive" "$SERVER_ADDR"
     update_config_line "$AGENT_CONF" "Hostname" "$SERVER_ADDR"
+    # AI-NOTE: Agent co-located with the server should not listen on all interfaces.
+    update_config_line "$AGENT_CONF" "ListenIP" "127.0.0.1"
     info "Agent configuration updated in $AGENT_CONF"
   else
     warn "Agent configuration file $AGENT_CONF not found. Skipping agent config."
   fi
 else
   info "DRY-RUN: Would configure agent at $AGENT_CONF"
-  info "DRY-RUN: Would set Server=$SERVER_ADDR, ServerActive=$SERVER_ADDR, Hostname=$SERVER_ADDR"
+  info "DRY-RUN: Would set Server=$SERVER_ADDR, ServerActive=$SERVER_ADDR, Hostname=$SERVER_ADDR, ListenIP=127.0.0.1"
 fi
 
 #-------------------------- Enable and start services --------------------
@@ -700,6 +756,19 @@ info "Enabling and starting Zabbix server..."
 run_cmd systemctl enable --now zabbix-server
 # AI-NOTE: BUG FIX — --agent2 installs zabbix-agent2 package/service, not zabbix-agent.
 run_cmd systemctl enable --now "$AGENT_SVC"
+# Stop/disable the unused agent so only one listens (matches README promise).
+# The opposite package may be absent — never fail the install for that.
+if $DRY_RUN; then
+  if $USE_AGENT2; then
+    info "DRY-RUN: Would disable unused agent unit zabbix-agent"
+  else
+    info "DRY-RUN: Would disable unused agent unit zabbix-agent2"
+  fi
+elif $USE_AGENT2; then
+  systemctl disable --now zabbix-agent 2>/dev/null || true
+else
+  systemctl disable --now zabbix-agent2 2>/dev/null || true
+fi
 
 if ! $SKIP_APACHE; then
   info "Configuring Apache for Zabbix..."
@@ -722,8 +791,12 @@ if $ENABLE_FIREWALL; then
   run_cmd ufw allow OpenSSH
   # AI-NOTE: BUG FIX — 'Zabbix Agent' UFW profile is not present on all Ubuntu
   # releases; explicit ports below are the portable equivalent.
-  run_cmd ufw allow 80/tcp
-  run_cmd ufw allow 443/tcp
+  if ! $SKIP_APACHE; then
+    run_cmd ufw allow 80/tcp
+    if [[ "$TLS_MODE" != "none" ]]; then
+      run_cmd ufw allow 443/tcp
+    fi
+  fi
   run_cmd ufw allow 10051/tcp
   run_cmd ufw allow 10050/tcp
   run_cmd ufw --force enable
@@ -803,11 +876,25 @@ info "Zabbix Version: $ZABBIX_VERSION"
 if ! $DRY_RUN; then
   info "Admin Login: Admin"
   if [[ -n "$ZABBIX_ADMIN_PASS" ]]; then
-    info "Admin Password: $ZABBIX_ADMIN_PASS"
+    # AI-NOTE: info()/log() always mask secrets, so print the Admin password
+    # once on the console and only record a redacted note in the log file.
+    echo "Admin Password: $ZABBIX_ADMIN_PASS"
+    info "Admin Password: [shown once on console; not written to log]"
+    if [[ -z "$SAVE_CREDS" ]]; then
+      warn "Tip: re-run with --save-creds <file> next time to persist credentials securely"
+    fi
   else
     info "Admin Password: (unchanged — not rotated on idempotent re-run)"
   fi
 fi
 info "==============================================="
-info "Access Zabbix at: http://$SERVER_ADDR/zabbix/"
-info "Default credentials: Admin / (see --save-creds or re-run to see password)"
+if $SKIP_APACHE; then
+  info "Apache skipped — configure your external web frontend separately"
+else
+  if [[ "$TLS_MODE" == "none" ]]; then
+    info "Access Zabbix at: http://$SERVER_ADDR/zabbix/"
+  else
+    info "Access Zabbix at: https://$SERVER_ADDR/zabbix/"
+  fi
+fi
+info "Default credentials: Admin / (see console output or --save-creds file)"
