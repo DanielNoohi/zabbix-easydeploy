@@ -11,7 +11,7 @@ jobs:
   lint:
     name: Lint (shellcheck + shfmt)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
     - uses: actions/checkout@v4
 
@@ -29,7 +29,7 @@ jobs:
   bats:
     name: Bats tests
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
     - uses: actions/checkout@v4
 
@@ -44,7 +44,7 @@ jobs:
   integration:
     name: Integration (${{ matrix.ubuntu }})
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

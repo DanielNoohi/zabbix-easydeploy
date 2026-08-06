@@ -141,10 +141,10 @@ run_cmd() {
     info "Running: $cmdline"
     if [[ "$1" == "apt-get" ]]; then
       wait_for_apt
-      DEBIAN_FRONTEND=noninteractive timeout 600 env \
+      DEBIAN_FRONTEND=noninteractive timeout 300 env \
         DEBIAN_FRONTEND=noninteractive \
         APT_LISTCHANGES_FRONTEND=none \
-        apt-get -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=300 "${@:2}"
+        apt-get -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=120 "${@:2}"
     else
       "$@" || {
         echo "Command failed: $cmdline"
