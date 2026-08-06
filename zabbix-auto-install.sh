@@ -115,6 +115,7 @@ disable_apt_timers() {
   sleep 2
 }
 
+
 run_cmd() {
   local cmdline
   printf -v cmdline '%q ' "$@"
@@ -124,39 +125,13 @@ run_cmd() {
   else
     info "Running: $cmdline"
     if [[ "$1" == "apt-get" ]]; then
-      # Wait for dpkg to release, then run
-      timeout 600 env         DEBIAN_FRONTEND=noninteractive         APT_LISTCHANGES_FRONTEND=none         apt-get -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=300 "${@:2}"
+      DEBIAN_FRONTEND=noninteractive timeout 600 env         DEBIAN_FRONTEND=noninteractive         APT_LISTCHANGES_FRONTEND=none         apt-get -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=300 "${@:2}"
     else
       "$@" || { echo "Command failed: $cmdline"; exit 1; }
     fi
   fi
-}"
-  if $DRY_RUN; then
-    info "DRY-RUN: $cmdline"
-  else
-    info "Running: $cmdline"
-    if [[ "$1" == "apt-get" ]]; then
-      DEBIAN_FRONTEND=noninteractive timeout 600 apt-get -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=300 "${@:2}"
-    else
-      "$@"
-    fi
-  fi
 }
-  if $DRY_RUN; then
-    info "DRY-RUN: $cmdline"
-  else
-    info "Running: $cmdline"
-    if [[ "$1" == "apt-get" ]]; then
-      # Fix any broken dpkg state before running apt
-      dpkg --configure -a 2>/dev/null || true
-      # Let apt handle lock waiting natively (DPkg::Lock::Timeout) with a generous outer timeout
-      DEBIAN_FRONTEND=noninteractive timeout 900 \
-        apt-get -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=600 "${@:2}"
-    else
-      "$@"
-    fi
-  fi
-}
+
 
 generate_password() {
   openssl rand -base64 18 | tr -dc 'A-Za-z0-9!@#$%^&*' | head -c 24
